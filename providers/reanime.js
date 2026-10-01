@@ -1,610 +1,1459 @@
-const CryptoJS=require("crypto-js");
+const CryptoJS = require("crypto-js");
 
-const REANIME_DOMAINS=["https://reanime.to","https://reanime.cz","https://reanime.wtf"];
-const FLIXCLOUD_BASE="https://flixcloud.cc";
-const TMDB_API_KEY="439c478a771f35c05022f9feabcca01c";
-const ANIBRIDGE_URL="https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
-const CINEMETA_URL="https://v3-cinemeta.strem.io/meta";
-const ARM_BASE="https://arm.haglund.dev/api/v2";
-const UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const HEADERS={"User-Agent":UA,"Accept":"application/json, text/plain, */*","Accept-Language":"en-US,en;q=0.9"};
-const FLIX_HEADERS={"User-Agent":UA,"Accept":"*/*","Origin":FLIXCLOUD_BASE,"Referer":`${FLIXCLOUD_BASE}/`};
+// =========================================================
+// CONFIG
+// =========================================================
 
-let activeBaseUrl=REANIME_DOMAINS[0],mappingCache=null;
-const MAPPING_TTL=24*60*60*1000;
+const REANIME_DOMAINS = [
+  "https://reanime.to",
+  "https://reanime.cz",
+  "https://reanime.wtf"
+];
 
-const log=(...a)=>console.log("[Reanime]",...a);
-const err=(...a)=>console.error("[Reanime]",...a);
+const FLIXCLOUD_BASE = "https://flixcloud.cc";
+const TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
+const FRIBB_URL =
+  "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json";
+const CINEMETA_URL = "https://v3-cinemeta.strem.io/meta";
 
-function absolutize(path,base=activeBaseUrl){
-  if(!path)return"";
-  if(/^https?:\/\//i.test(path))return path;
-  return`${base}${path.startsWith("/")?"":"/"}${path}`;
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/124.0.0.0 Safari/537.36";
+
+const DEFAULT_HEADERS = {
+  "User-Agent": USER_AGENT,
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9"
+};
+
+const FLIX_HEADERS = {
+  "User-Agent": USER_AGENT,
+  "Accept": "*/*",
+  "Origin": FLIXCLOUD_BASE,
+  "Referer": `${FLIXCLOUD_BASE}/`
+};
+
+let activeBaseUrl = REANIME_DOMAINS[0];
+let fribbCache = null;
+
+// =========================================================
+// LOGGING
+// =========================================================
+
+const log = (...args) =>
+  console.log("[Reanime-Fribb]", ...args);
+
+const err = (...args) =>
+  console.error("[Reanime-Fribb]", ...args);
+
+function section(name) {
+  log("========================================");
+  log(name);
+  log("========================================");
 }
 
-async function fetchText(url,options={}){
-  const absolute=/^https?:\/\//i.test(url);
-  const urls=absolute?[url]:REANIME_DOMAINS.map(d=>absolutize(url,d));
-  let lastError;
+// =========================================================
+// HTTP
+// =========================================================
 
-  for(const u of urls){
-    try{
-      const r=await fetch(u,{...options,headers:{...HEADERS,...(options.headers||{})}});
-      log("HTTP",r.status,u);
-      if(r.ok){
-        if(!absolute){
-          const m=u.match(/^(https?:\/\/[^/]+)/);
-          if(m)activeBaseUrl=m[1];
+function absolutize(path, base = activeBaseUrl) {
+  if (!path) return "";
+
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
+async function fetchText(url, options = {}) {
+  const absolute = /^https?:\/\//i.test(url);
+
+  const urls = absolute
+    ? [url]
+    : REANIME_DOMAINS.map(domain => absolutize(url, domain));
+
+  let lastError = null;
+
+  for (const currentUrl of urls) {
+    try {
+      log("HTTP REQUEST", currentUrl);
+
+      const response = await fetch(currentUrl, {
+        ...options,
+        headers: {
+          ...DEFAULT_HEADERS,
+          ...(options.headers || {})
         }
-        return await r.text();
+      });
+
+      log("HTTP RESPONSE", response.status, currentUrl);
+
+      if (response.ok) {
+        if (!absolute) {
+          try {
+            activeBaseUrl = new URL(currentUrl).origin;
+            log("ACTIVE REANIME DOMAIN", activeBaseUrl);
+          } catch {}
+        }
+
+        return await response.text();
       }
-      lastError=new Error(`HTTP ${r.status}`);
-    }catch(e){
-      lastError=e;
-      log("HTTP error",u,e?.message);
+
+      lastError = new Error(`HTTP ${response.status}`);
+      log("HTTP FAILED", response.status, currentUrl);
+    } catch (e) {
+      lastError = e;
+      log(
+        "HTTP EXCEPTION",
+        currentUrl,
+        e?.message || String(e)
+      );
     }
   }
 
-  throw lastError||new Error(`Failed: ${url}`);
+  throw lastError || new Error(`Request failed: ${url}`);
 }
 
-async function fetchJson(url,options={}){
-  return JSON.parse(await fetchText(url,{
+async function fetchJson(url, options = {}) {
+  const text = await fetchText(url, {
     ...options,
-    headers:{"Accept":"application/json, text/plain, */*",...(options.headers||{})}
-  }));
+    headers: {
+      "Accept": "application/json, text/plain, */*",
+      ...(options.headers || {})
+    }
+  });
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(
+      `Invalid JSON from ${url}: ${e?.message || e}`
+    );
+  }
 }
 
 // =========================================================
 // TMDB
 // =========================================================
 
-function TMDB_BASE(type){
-  return`https://api.themoviedb.org/3/${type}`;
+function tmdbBase(type) {
+  return `https://api.themoviedb.org/3/${
+    type === "movie" ? "movie" : "tv"
+  }`;
 }
 
-async function getTmdbInfo(tmdbId,mediaType){
-  const type=mediaType==="movie"?"movie":"tv";
-  log("TMDB lookup",tmdbId,type);
+async function getTmdbInfo(tmdbId, mediaType) {
+  const type = mediaType === "movie" ? "movie" : "tv";
 
-  try{
-    const data=await fetchJson(
-      `${TMDB_BASE(type)}/${encodeURIComponent(tmdbId)}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
-    );
+  log("TMDB LOOKUP START", `ID=${tmdbId}`, `TYPE=${type}`);
 
-    let imdbId=data?.external_ids?.imdb_id||data?.imdb_id||null;
+  try {
+    const url =
+      `${tmdbBase(type)}/${encodeURIComponent(tmdbId)}` +
+      `?api_key=${TMDB_API_KEY}` +
+      `&append_to_response=external_ids`;
 
-    if(!imdbId){
-      log("TMDB has no IMDb ID, trying ARM");
-      try{
-        const arm=await fetchJson(`${ARM_BASE}/themoviedb?id=${encodeURIComponent(tmdbId)}`);
-        if(Array.isArray(arm)&&arm.length)imdbId=arm[0]?.imdb||null;
-      }catch(e){
-        log("ARM lookup failed",e?.message);
+    const data = await fetchJson(url);
+
+    const imdbId =
+      data?.external_ids?.imdb_id ||
+      data?.imdb_id ||
+      null;
+
+    const title =
+      data?.name ||
+      data?.title ||
+      data?.original_name ||
+      data?.original_title ||
+      "Anime";
+
+    const year = (
+      data?.first_air_date ||
+      data?.release_date ||
+      ""
+    ).slice(0, 4);
+
+    log("TMDB LOOKUP SUCCESS");
+    log("TMDB ID", data?.id ?? tmdbId);
+    log("TMDB TITLE", title);
+    log("TMDB ORIGINAL", data?.original_name || data?.original_title || "N/A");
+    log("TMDB YEAR", year || "N/A");
+    log("TMDB IMDb", imdbId || "NOT FOUND");
+
+    if (!imdbId) {
+      log(
+        "TMDB IMDb MISSING",
+        "Trying fallback ARM lookup"
+      );
+
+      try {
+        const armUrl =
+          `https://arm.haglund.dev/api/v2/themoviedb` +
+          `?id=${encodeURIComponent(tmdbId)}`;
+
+        const arm = await fetchJson(armUrl);
+
+        if (Array.isArray(arm) && arm.length) {
+          const armImdb = arm[0]?.imdb || null;
+
+          if (armImdb) {
+            log("ARM IMDb FOUND", armImdb);
+
+            return {
+              title,
+              year,
+              imdbId: armImdb
+            };
+          }
+        }
+
+        log("ARM IMDb NOT FOUND");
+      } catch (e) {
+        log(
+          "ARM LOOKUP FAILED",
+          e?.message || String(e)
+        );
       }
     }
 
-    log("TMDB result","IMDb:",imdbId);
-
-    return{
-      title:data?.name||data?.title||data?.original_name||data?.original_title||"Anime",
-      year:(data?.first_air_date||data?.release_date||"").slice(0,4),
+    return {
+      title,
+      year,
       imdbId
     };
-  }catch(e){
-    err("TMDB lookup failed",e?.message);
+  } catch (e) {
+    err(
+      "TMDB LOOKUP FAILED",
+      e?.stack || e?.message || e
+    );
+
     return null;
   }
 }
 
 // =========================================================
-// ANIBRIDGE
+// FRIBB MAPPING
 // =========================================================
 
-function parseDescriptor(v){
-  const m=String(v||"").match(/^([^:]+):([^:]+)(?::s(\d+))?$/);
-  return m?{provider:m[1],id:m[2],season:m[3]===undefined?null:Number(m[3])}:null;
-}
+async function loadFribb() {
+  if (Array.isArray(fribbCache) && fribbCache.length) {
+    log(
+      "FRIBB CACHE HIT",
+      `entries=${fribbCache.length}`
+    );
 
-function parseRange(v){
-  const m=String(v||"").trim().match(/^(\d+)(?:-(\d*))?$/);
-  return m?{start:Number(m[1]),end:m[2]===undefined||m[2]===""?Infinity:Number(m[2])}:null;
-}
+    return fribbCache;
+  }
 
-function parseTargetRanges(v){
-  let text=String(v||"").trim(),ratio=1;
-  const m=text.match(/\|(-?\d+(?:\.\d+)?)$/);
-  if(m){ratio=Number(m[1]);text=text.slice(0,m.index);}
-  return{ratio,ranges:text.split(",").map(parseRange).filter(Boolean)};
-}
+  section("FRIBB DATABASE LOAD");
 
-function buildEpisodeMapping(sourceRange,targetRange){
-  const source=parseRange(sourceRange),target=parseTargetRanges(targetRange);
-  return!source||!target.ranges.length?null:{
-    sourceStart:source.start,sourceEnd:source.end,
-    ratio:target.ratio,targets:target.ranges
-  };
-}
+  log("FRIBB URL", FRIBB_URL);
+  log("Downloading Fribb mapping database...");
 
-function buildIndex(raw){
-  const movies=Object.create(null),shows=Object.create(null);
-
-  for(const[sourceDescriptor,targets]of Object.entries(raw||{})){
-    const source=parseDescriptor(sourceDescriptor);
-    if(!source||!targets||typeof targets!=="object")continue;
-
-    if(source.provider==="imdb_movie"){
-      for(const td of Object.keys(targets)){
-        const target=parseDescriptor(td);
-        if(target?.provider==="anilist"){
-          movies[source.id]=String(target.id);
-          break;
-        }
+  try {
+    const response = await fetch(FRIBB_URL, {
+      headers: {
+        "User-Agent": "Reanime-Nuvio/1.0",
+        "Accept": "application/json"
       }
+    });
+
+    log("FRIBB HTTP", response.status);
+
+    if (!response.ok) {
+      throw new Error(
+        `Fribb HTTP ${response.status}`
+      );
+    }
+
+    const data = await response.json();
+
+    if (!Array.isArray(data)) {
+      throw new Error(
+        "Fribb response is not an array"
+      );
+    }
+
+    fribbCache = data;
+
+    log(
+      "FRIBB DATABASE LOADED",
+      `entries=${fribbCache.length}`
+    );
+
+    return fribbCache;
+  } catch (e) {
+    err(
+      "FRIBB DATABASE LOAD FAILED",
+      e?.stack || e?.message || e
+    );
+
+    return null;
+  }
+}
+
+function idMatches(value, target) {
+  if (value === undefined || value === null) {
+    return false;
+  }
+
+  const wanted = String(target);
+
+  if (Array.isArray(value)) {
+    return value.some(
+      item => String(item) === wanted
+    );
+  }
+
+  return String(value) === wanted;
+}
+
+function getFribbSeason(entry) {
+  const value = entry?.season?.tmdb;
+
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : null;
+}
+
+function getFribbEpisodeOffset(entry) {
+  const raw = entry?.episode_offset?.tmdb;
+
+  if (raw === undefined || raw === null || raw === "") {
+    return 0;
+  }
+
+  const offset = Number(raw);
+
+  return Number.isFinite(offset)
+    ? offset
+    : 0;
+}
+
+async function resolveFribbMapping({
+  tmdbId,
+  mediaType,
+  season = 1,
+  episode = 1
+}) {
+  section("FRIBB MAPPING");
+
+  log(
+    "FRIBB INPUT",
+    `TMDB=${tmdbId}`,
+    `TYPE=${mediaType}`,
+    `S${season}E${episode}`
+  );
+
+  const rows = await loadFribb();
+
+  if (!rows) {
+    err("FRIBB STOP: database unavailable");
+    return null;
+  }
+
+  const targetTmdbId = String(tmdbId);
+  const isMovie = mediaType === "movie";
+  const targetSeason = Number(season) || 1;
+  const targetEpisode = Number(episode) || 1;
+
+  log(
+    "FRIBB SEARCH",
+    `TMDB=${targetTmdbId}`,
+    isMovie
+      ? "MOVIE"
+      : `TV SEASON=${targetSeason} EPISODE=${targetEpisode}`
+  );
+
+  const matches = [];
+
+  for (const entry of rows) {
+    if (!entry || typeof entry !== "object") {
       continue;
     }
 
-    if(source.provider!=="imdb_show"||source.season===null)continue;
+    const tmdbIds = entry?.themoviedb_id;
 
-    const entries=[];
-
-    for(const[td,ranges]of Object.entries(targets)){
-      const target=parseDescriptor(td);
-      if(!target||target.provider!=="anilist")continue;
-
-      const mappings=[];
-
-      if(ranges&&typeof ranges==="object"){
-        for(const[sr,tr]of Object.entries(ranges)){
-          const mapping=buildEpisodeMapping(sr,tr);
-          if(mapping)mappings.push(mapping);
-        }
-      }
-
-      entries.push({anilistId:String(target.id),ranges:mappings});
+    if (!tmdbIds || typeof tmdbIds !== "object") {
+      continue;
     }
 
-    if(entries.length)shows[`${source.id}|${source.season}`]=entries;
-  }
-
-  return{movies,shows};
-}
-
-function findTargetEpisode(mapping,episode){
-  const ep=Number(episode);
-  if(!Number.isFinite(ep)||ep<1)return null;
-  if(!mapping.ranges.length)return ep;
-
-  for(const range of mapping.ranges){
-    if(ep<range.sourceStart)continue;
-    if(Number.isFinite(range.sourceEnd)&&ep>range.sourceEnd)continue;
-
-    const offset=ep-range.sourceStart;
-    const targetOffset=range.ratio===1
-      ?offset
-      :range.ratio>0
-        ?Math.floor(offset*range.ratio)
-        :Math.floor(offset/Math.abs(range.ratio));
-
-    let remaining=targetOffset;
-
-    for(const target of range.targets){
-      const length=Number.isFinite(target.end)?target.end-target.start+1:Infinity;
-      if(remaining<length)return target.start+remaining;
-      remaining-=length;
-    }
-
-    return null;
-  }
-
-  return null;
-}
-
-async function loadMapping(){
-  if(mappingCache&&Date.now()-mappingCache.updatedAt<MAPPING_TTL){
-    log("Using cached AniBridge mapping");
-    return mappingCache.index;
-  }
-
-  log("Downloading AniBridge mapping");
-
-  try{
-    const r=await fetch(ANIBRIDGE_URL,{
-      headers:{Accept:"application/json","User-Agent":"Reanime-Nuvio/1.0"}
-    });
-
-    log("AniBridge HTTP",r.status);
-
-    if(!r.ok)throw new Error(`AniBridge HTTP ${r.status}`);
-
-    const raw=await r.json();
-    log("AniBridge JSON loaded");
-
-    const index=buildIndex(raw);
-    const movieCount=Object.keys(index.movies).length;
-    const showCount=Object.keys(index.shows).length;
-
-    log("AniBridge index",`movies=${movieCount}`,`shows=${showCount}`);
-
-    if(!movieCount&&!showCount)
-      throw new Error("AniBridge index empty");
-
-    mappingCache={updatedAt:Date.now(),index};
-    return index;
-  }catch(e){
-    err("AniBridge load failed",e?.message);
-    return mappingCache?.index||null;
-  }
-}
-
-async function resolveImdbToAnilist({imdbId,type,season=1,episode=1}){
-  log("Mapping IMDb → AniList",imdbId,type,`S${season}E${episode}`);
-
-  if(!imdbId||!/^tt\d+$/i.test(String(imdbId)))return null;
-
-  const index=await loadMapping();
-  if(!index)return null;
-
-  const id=String(imdbId).trim();
-
-  if(type==="movie"){
-    const anilistId=index.movies?.[id];
-    log("Movie AniList ID",anilistId||"NOT FOUND");
-    return anilistId?{anilistId:String(anilistId),episode:1,source:"anibridge"}:null;
-  }
-
-  const s=Number(season),ep=Number(episode);
-  if(!Number.isFinite(s)||!Number.isFinite(ep))return null;
-
-  const candidates=index.shows?.[`${id}|${s}`];
-
-  log("Show mapping candidates",candidates?.length||0);
-
-  if(!Array.isArray(candidates))return null;
-
-  for(const candidate of candidates){
-    const targetEpisode=findTargetEpisode(candidate,ep);
-
-    if(targetEpisode!==null){
-      log("Mapped","AniList:",candidate.anilistId,"Episode:",targetEpisode);
-      return{
-        anilistId:String(candidate.anilistId),
-        episode:targetEpisode,
-        source:"anibridge"
-      };
-    }
-  }
-
-  log("Episode mapping not found");
-  return null;
-}
-
-// =========================================================
-// REANIME
-// =========================================================
-
-function slugify(v){
-  return String(v||"")
-    .toLowerCase()
-    .replace(/['’]/g,"")
-    .replace(/[^a-z0-9]+/g,"-")
-    .replace(/^-+|-+$/g,"");
-}
-
-async function getReanimeSlug(tmdbId,mediaType){
-  log("Cinemeta slug lookup",tmdbId);
-
-  try{
-    const type=mediaType==="movie"?"movie":"tv";
-    const data=await fetchJson(
-      `${CINEMETA_URL}/${type}/tmdb:${encodeURIComponent(tmdbId)}.json`
+    const movieMatch = idMatches(
+      tmdbIds.movie,
+      targetTmdbId
     );
 
-    const slug=data?.meta?.slug||slugify(data?.meta?.name||data?.meta?.title);
-    log("Cinemeta slug",slug||"NOT FOUND");
-    return slug;
-  }catch(e){
-    log("Cinemeta lookup failed",e?.message);
+    const tvMatch = idMatches(
+      tmdbIds.tv,
+      targetTmdbId
+    );
+
+    if (isMovie) {
+      if (!movieMatch) continue;
+    } else {
+      if (!tvMatch) continue;
+
+      const fribbSeason = getFribbSeason(entry);
+
+      if (
+        fribbSeason !== null &&
+        fribbSeason !== targetSeason
+      ) {
+        continue;
+      }
+    }
+
+    if (
+      entry.anilist_id === undefined ||
+      entry.anilist_id === null ||
+      entry.anilist_id === ""
+    ) {
+      log(
+        "FRIBB MATCH WITHOUT ANILIST",
+        JSON.stringify({
+          tmdb: tmdbIds,
+          season: entry?.season,
+          anilist_id: entry?.anilist_id
+        })
+      );
+
+      continue;
+    }
+
+    matches.push(entry);
+  }
+
+  log(
+    "FRIBB MATCH COUNT",
+    matches.length
+  );
+
+  if (!matches.length) {
+    log(
+      "FRIBB NO MAPPING",
+      `TMDB=${targetTmdbId}`,
+      isMovie
+        ? "movie"
+        : `S${targetSeason}E${targetEpisode}`
+    );
+
     return null;
   }
-}
 
-function filterServers(servers,language){
-  return Array.isArray(servers)
-    ?servers.filter(s=>s?.dataType?.toLowerCase()===language.toLowerCase())
-    :[];
-}
+  if (matches.length > 1) {
+    log(
+      "FRIBB MULTIPLE MATCHES",
+      matches.length
+    );
 
-async function getFlixEmbeds(slug,episodeNumber,language,anilistId){
-  const watchPath=`/watch/${slug||"anime"}?ep=${episodeNumber}`;
+    for (let i = 0; i < matches.length; i++) {
+      const candidate = matches[i];
 
-  log("Flix lookup",`AniList=${anilistId}`,`E=${episodeNumber}`,language);
-
-  if(anilistId){
-    try{
-      const json=await fetchJson(`/api/flix/${anilistId}/${episodeNumber}`,{
-        headers:{Referer:absolutize(watchPath)}
-      });
-
-      if(json?.success&&Array.isArray(json.servers)){
-        const servers=filterServers(json.servers,language);
-
-        log("Primary Flix servers",servers.length);
-
-        if(servers.length)
-          return{
-            watchUrl:absolutize(watchPath),
-            servers,
-            embeds:servers.map(s=>s.dataLink).filter(Boolean)
-          };
-      }
-    }catch(e){
-      log("Primary Flix failed",e?.message);
+      log(
+        "FRIBB CANDIDATE",
+        i + 1,
+        JSON.stringify({
+          anilist_id: candidate?.anilist_id,
+          season: candidate?.season,
+          episode_offset: candidate?.episode_offset,
+          tmdb: candidate?.themoviedb_id
+        })
+      );
     }
   }
 
-  if(slug){
-    try{
-      log("Trying ReAnime slug API");
+  const entry = matches[0];
 
-      const anime=await fetchJson(`/api/v1/anime/${slug}`);
-      const alId=anime?.anilist_id;
+  const offset = getFribbEpisodeOffset(entry);
 
-      if(alId){
-        log("Slug AniList ID",alId);
+  const mappedEpisode = isMovie
+    ? 1
+    : targetEpisode + offset;
 
-        const json=await fetchJson(`/api/flix/${alId}/${episodeNumber}`,{
-          headers:{Referer:absolutize(watchPath)}
-        });
+  const anilistId = String(
+    entry.anilist_id
+  );
 
-        if(json?.success&&Array.isArray(json.servers)){
-          const servers=filterServers(json.servers,language);
-          log("Slug Flix servers",servers.length);
+  log(
+    "FRIBB MAPPING SUCCESS"
+  );
 
-          if(servers.length)
-            return{
-              watchUrl:absolutize(watchPath),
-              servers,
-              embeds:servers.map(s=>s.dataLink).filter(Boolean)
-            };
-        }
-      }
-    }catch(e){
-      log("Slug API failed",e?.message);
-    }
+  log(
+    "FRIBB TMDB ID",
+    targetTmdbId
+  );
 
-    try{
-      log("Trying ReAnime HTML fallback");
+  log(
+    "FRIBB AniList ID",
+    anilistId
+  );
 
-      const html=await fetchText(`/anime/${slug}?_ep=${episodeNumber}`);
-      const m=html.match(/anilist_id:\s*(\d+)/);
+  log(
+    "FRIBB TMDB SEASON",
+    isMovie ? "movie" : targetSeason
+  );
 
-      if(m){
-        log("HTML AniList ID",m[1]);
+  log(
+    "FRIBB INPUT EPISODE",
+    isMovie ? "movie" : targetEpisode
+  );
 
-        const json=await fetchJson(`/api/flix/${m[1]}/${episodeNumber}`,{
-          headers:{Referer:absolutize(watchPath)}
-        });
+  log(
+    "FRIBB EPISODE OFFSET",
+    offset
+  );
 
-        if(json?.success&&Array.isArray(json.servers)){
-          const servers=filterServers(json.servers,language);
-          log("HTML Flix servers",servers.length);
+  log(
+    "FRIBB OUTPUT EPISODE",
+    mappedEpisode
+  );
 
-          if(servers.length)
-            return{
-              watchUrl:absolutize(watchPath),
-              servers,
-              embeds:servers.map(s=>s.dataLink).filter(Boolean)
-            };
-        }
-      }
-    }catch(e){
-      log("HTML fallback failed",e?.message);
-    }
-  }
-
-  return{watchUrl:absolutize(watchPath),servers:[],embeds:[]};
-}
-
-// =========================================================
-// FLIXCLOUD
-// =========================================================
-
-function sha256hex(v){
-  return CryptoJS.SHA256(CryptoJS.enc.Utf8.parse(String(v))).toString(CryptoJS.enc.Hex);
-}
-
-function fromBase64(v){
-  return Uint8Array.from(atob(String(v)),c=>c.charCodeAt(0));
-}
-
-function uint8ToWordArray(bytes){
-  const words=[];
-  for(let i=0;i<bytes.length;i++)
-    words[i>>>2]=(words[i>>>2]||0)|(bytes[i]<<(24-(i%4)*8));
-  return CryptoJS.lib.WordArray.create(words,bytes.length);
-}
-
-function wordArrayToUint8(w){
-  const out=new Uint8Array(w.sigBytes);
-  for(let i=0;i<w.sigBytes;i++)
-    out[i]=(w.words[i>>>2]>>>(24-(i%4)*8))&255;
-  return out;
-}
-
-function generateFields(seed){
-  let e=seed,l;
-
-  for(let i=0;i<3;i++)e=sha256hex(e+i);
-  l=e;
-  for(let i=0;i<3;i++)l=sha256hex(l+i);
-
-  return{
-    keyField:"kf_"+e.substring(8,16),
-    ivField:"ivf_"+e.substring(16,24),
-    containerName:"cd_"+e.substring(24,32),
-    arrayName:"ad_"+e.substring(32,40),
-    objectName:"od_"+e.substring(40,48),
-    tokenField:e.substring(48,64)+"_"+e.substring(56,64),
-    keyFrag2Field:l.substring(0,16)+"_"+l.substring(16,24)
+  return {
+    anilistId,
+    episode: mappedEpisode,
+    source: "fribb"
   };
 }
 
-async function runWasm(wasmB64,frag1,kf2,TBytes,seedInt){
-  log("Starting FlixCloud WASM");
+// =========================================================
+// REANIME / CINEMETA
+// =========================================================
 
-  const{instance}=await WebAssembly.instantiate(fromBase64(wasmB64));
-  const{_s,_r,memory}=instance.exports;
-
-  if(typeof _s!=="function"||typeof _r!=="function"||!memory)
-    throw new Error("Invalid FlixCloud WASM exports");
-
-  const heap=new Uint8Array(memory.buffer);
-  const len=frag1.length,y=1000,v=y+len,T=y+2*len,out=y+3*len;
-
-  heap.set(frag1,y);
-  heap.set(kf2,v);
-  heap.set(TBytes,T);
-
-  _s(seedInt);
-  _r(y,v,T,out,len);
-
-  log("FlixCloud WASM complete");
-  return heap.slice(out,out+len);
+function slugify(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
-function extractSsrObject(html){
-  const marker=html.match(/\{type:"data",data:(\{)/);
-  if(!marker)throw new Error("SSR data block not found");
+async function getReanimeSlug(
+  tmdbId,
+  mediaType
+) {
+  section("CINEMETA");
 
-  const start=html.indexOf("{",marker.index+marker[0].length-1);
-  let depth=0;
+  const type =
+    mediaType === "movie"
+      ? "movie"
+      : "tv";
 
-  for(let i=start;i<html.length;i++){
-    if(html[i]==="{")depth++;
-    else if(html[i]==="}"&&!--depth)return html.slice(start,i+1);
+  const url =
+    `${CINEMETA_URL}/${type}/` +
+    `tmdb:${encodeURIComponent(tmdbId)}.json`;
+
+  log("CINEMETA REQUEST", url);
+
+  try {
+    const data = await fetchJson(url);
+
+    const meta = data?.meta;
+
+    const slug =
+      meta?.slug ||
+      slugify(
+        meta?.name ||
+        meta?.title
+      );
+
+    log(
+      "CINEMETA SUCCESS",
+      `slug=${slug || "NOT FOUND"}`
+    );
+
+    if (!slug) {
+      log(
+        "CINEMETA NO SLUG",
+        JSON.stringify(meta || {})
+      );
+    }
+
+    return slug || null;
+  } catch (e) {
+    log(
+      "CINEMETA FAILED",
+      e?.message || String(e)
+    );
+
+    return null;
+  }
+}
+
+// =========================================================
+// REANIME FLIX
+// =========================================================
+
+function filterServers(
+  servers,
+  language
+) {
+  if (!Array.isArray(servers)) {
+    return [];
   }
 
-  throw new Error("SSR brace matching failed");
+  return servers.filter(
+    server =>
+      server?.dataType?.toLowerCase() ===
+      String(language).toLowerCase()
+  );
 }
 
-function parseSsrData(html){
-  return Function(`"use strict";return(${extractSsrObject(html)});`)();
-}
+async function getFlixEmbeds(
+  slug,
+  episodeNumber,
+  language,
+  anilistId
+) {
+  section(
+    `REANIME FLIX ${String(language).toUpperCase()}`
+  );
 
-async function resolveFlixCloud(embedUrl){
-  log("Resolving FlixCloud",embedUrl);
+  const watchPath =
+    `/watch/${slug || "anime"}?ep=${episodeNumber}`;
 
-  const match=String(embedUrl).match(/\/e\/([^?#\s]+)(?:\?v=(\d+))?/i);
-  if(!match)throw new Error("Invalid FlixCloud embed URL");
+  log(
+    "FLIX INPUT",
+    `AniList=${anilistId}`,
+    `Episode=${episodeNumber}`,
+    `Language=${language}`,
+    `Slug=${slug || "NONE"}`
+  );
 
-  const accessId=match[1],version=Number(match[2])||2;
+  if (!anilistId) {
+    log("FLIX STOP: Missing AniList ID");
 
-  const response=await fetch(
-    `${FLIXCLOUD_BASE}/e/${accessId}?v=${version}`,
-    {
-      headers:{
-        "User-Agent":UA,
-        Accept:"*/*",
-        Referer:"https://reanime.to/"
+    return {
+      watchUrl: absolutize(watchPath),
+      servers: [],
+      embeds: []
+    };
+  }
+
+  try {
+    const url =
+      `/api/flix/${anilistId}/${episodeNumber}`;
+
+    log(
+      "FLIX PRIMARY REQUEST",
+      absolutize(url)
+    );
+
+    const data = await fetchJson(url, {
+      headers: {
+        Referer: absolutize(watchPath)
+      }
+    });
+
+    log(
+      "FLIX PRIMARY RESPONSE",
+      JSON.stringify({
+        success: data?.success,
+        serverCount: Array.isArray(data?.servers)
+          ? data.servers.length
+          : 0
+      })
+    );
+
+    if (
+      data?.success &&
+      Array.isArray(data.servers)
+    ) {
+      const servers =
+        filterServers(
+          data.servers,
+          language
+        );
+
+      log(
+        "FLIX PRIMARY MATCHING SERVERS",
+        servers.length
+      );
+
+      if (servers.length) {
+        const embeds = servers
+          .map(server => server?.dataLink)
+          .filter(Boolean);
+
+        log(
+          "FLIX EMBEDS",
+          embeds.length
+        );
+
+        return {
+          watchUrl: absolutize(watchPath),
+          servers,
+          embeds
+        };
       }
     }
-  );
+  } catch (e) {
+    log(
+      "FLIX PRIMARY FAILED",
+      e?.message || String(e)
+    );
+  }
 
-  log("FlixCloud embed HTTP",response.status);
+  // Slug API fallback
+  if (slug) {
+    try {
+      log(
+        "FLIX SLUG API FALLBACK",
+        slug
+      );
 
-  if(!response.ok)
-    throw new Error(`FlixCloud HTTP ${response.status}`);
+      const anime =
+        await fetchJson(
+          `/api/v1/anime/${slug}`
+        );
 
-  const data=parseSsrData(await response.text());
-  const seed=data.obfuscation_seed;
+      const fallbackAniList =
+        anime?.anilist_id;
 
-  if(!seed)throw new Error("Missing obfuscation seed");
+      log(
+        "FLIX SLUG API AniList",
+        fallbackAniList || "NOT FOUND"
+      );
 
-  const fields=generateFields(seed);
-  const cryptoData=data.obfuscated_crypto_data;
-  if(!cryptoData)throw new Error("Missing crypto data");
+      if (fallbackAniList) {
+        const data =
+          await fetchJson(
+            `/api/flix/${fallbackAniList}/${episodeNumber}`,
+            {
+              headers: {
+                Referer: absolutize(watchPath)
+              }
+            }
+          );
 
-  const container=cryptoData[fields.containerName];
-  const array=container?.[fields.arrayName];
-  const object=array?.[0]?.[fields.objectName];
+        log(
+          "FLIX SLUG RESPONSE",
+          JSON.stringify({
+            success: data?.success,
+            serverCount: Array.isArray(data?.servers)
+              ? data.servers.length
+              : 0
+          })
+        );
 
-  if(!object)throw new Error("Missing crypto object");
+        if (
+          data?.success &&
+          Array.isArray(data.servers)
+        ) {
+          const servers =
+            filterServers(
+              data.servers,
+              language
+            );
 
-  const frag1=fromBase64(object[fields.keyField]);
-  const iv=fromBase64(object[fields.ivField]);
-  const kf2=fromBase64(data[fields.keyFrag2Field]);
-  const token=data[fields.tokenField];
+          log(
+            "FLIX SLUG MATCHING SERVERS",
+            servers.length
+          );
 
-  if(!token)throw new Error("Missing FlixCloud token");
-
-  log("FlixCloud token obtained");
-
-  const tokenResponse=await fetch(
-    `${FLIXCLOUD_BASE}/api/m3u8/${token}`,
-    {headers:FLIX_HEADERS}
-  );
-
-  log("FlixCloud M3U8 API HTTP",tokenResponse.status);
-
-  if(!tokenResponse.ok)
-    throw new Error(`FlixCloud API HTTP ${tokenResponse.status}`);
-
-  const tokenData=await tokenResponse.json();
-  const videoBytes=fromBase64(tokenData[sha256hex(token+"vid").substring(0,10)]);
-  const TBytes=fromBase64(tokenData[sha256hex(token+"key").substring(0,10)]);
-
-  if(!videoBytes.length||!TBytes.length)
-    throw new Error("Encrypted FlixCloud fields missing");
-
-  const wasmOutput=await runWasm(
-    data.w_payload,
-    frag1,
-    kf2,
-    TBytes,
-    parseInt(seed.substring(0,8),16)
-  );
-
-  const pbk=CryptoJS.PBKDF2(
-    uint8ToWordArray(wasmOutput),
-    CryptoJS.enc.Utf8.parse(seed),
-    {
-      keySize:8,
-      iterations:1000,
-      hasher:CryptoJS.algo.SHA256
+          if (servers.length) {
+            return {
+              watchUrl: absolutize(watchPath),
+              servers,
+              embeds: servers
+                .map(server => server?.dataLink)
+                .filter(Boolean)
+            };
+          }
+        }
+      }
+    } catch (e) {
+      log(
+        "FLIX SLUG API FAILED",
+        e?.message || String(e)
+      );
     }
-  );
 
-  const r=wordArrayToUint8(pbk);
+    // HTML fallback
+    try {
+      log(
+        "FLIX HTML FALLBACK",
+        slug
+      );
 
-  for(let i=0;i<32;i++)
-    r[i]^=seed.charCodeAt(i%seed.length);
+      const html =
+        await fetchText(
+          `/anime/${slug}?_ep=${episodeNumber}`
+        );
 
-  const decrypted=CryptoJS.AES.decrypt(
-    {ciphertext:uint8ToWordArray(videoBytes)},
-    CryptoJS.SHA256(uint8ToWordArray(r)),
-    {
-      iv:uint8ToWordArray(iv),
-      mode:CryptoJS.mode.CBC,
-      padding:CryptoJS.pad.Pkcs7
+      log(
+        "FLIX HTML LENGTH",
+        html.length
+      );
+
+      const match =
+        html.match(
+          /anilist_id:\s*(\d+)/
+        );
+
+      const htmlAniList =
+        match?.[1] || null;
+
+      log(
+        "FLIX HTML AniList",
+        htmlAniList || "NOT FOUND"
+      );
+
+      if (htmlAniList) {
+        const data =
+          await fetchJson(
+            `/api/flix/${htmlAniList}/${episodeNumber}`,
+            {
+              headers: {
+                Referer: absolutize(watchPath)
+              }
+            }
+          );
+
+        if (
+          data?.success &&
+          Array.isArray(data.servers)
+        ) {
+          const servers =
+            filterServers(
+              data.servers,
+              language
+            );
+
+          log(
+            "FLIX HTML MATCHING SERVERS",
+            servers.length
+          );
+
+          if (servers.length) {
+            return {
+              watchUrl: absolutize(watchPath),
+              servers,
+              embeds: servers
+                .map(server => server?.dataLink)
+                .filter(Boolean)
+            };
+          }
+        }
+      }
+    } catch (e) {
+      log(
+        "FLIX HTML FALLBACK FAILED",
+        e?.message || String(e)
+      );
     }
+  }
+
+  log(
+    "FLIX COMPLETE FAILURE",
+    `AniList=${anilistId}`,
+    `Episode=${episodeNumber}`,
+    `Language=${language}`
   );
 
-  const streamUrl=CryptoJS.enc.Utf8.stringify(decrypted).trim();
+  return {
+    watchUrl: absolutize(watchPath),
+    servers: [],
+    embeds: []
+  };
+}
 
-  if(!/^https?:\/\//i.test(streamUrl))
-    throw new Error("Invalid decrypted stream URL");
+// =========================================================
+// FLIXCLOUD CRYPTO
+// =========================================================
 
-  log("FlixCloud HLS resolved");
+function sha256hex(value) {
+  return CryptoJS.SHA256(
+    CryptoJS.enc.Utf8.parse(
+      String(value)
+    )
+  ).toString(
+    CryptoJS.enc.Hex
+  );
+}
 
-  return{
-    url:streamUrl,
-    subtitles:data.subtitles||[],
-    thumbnailsVtt:data.thumbnails_vtt||null,
-    videoTitle:data.video_title||null,
-    introChapter:data.intro_chapter||null,
-    outroChapter:data.outro_chapter||null,
-    videoId:data.video_id||null,
+function fromBase64(value) {
+  return Uint8Array.from(
+    atob(String(value)),
+    char => char.charCodeAt(0)
+  );
+}
+
+function uint8ToWordArray(bytes) {
+  const words = [];
+
+  for (let i = 0; i < bytes.length; i++) {
+    words[i >>> 2] =
+      (words[i >>> 2] || 0) |
+      (
+        bytes[i] <<
+        (24 - (i % 4) * 8)
+      );
+  }
+
+  return CryptoJS.lib.WordArray.create(
+    words,
+    bytes.length
+  );
+}
+
+function wordArrayToUint8(wordArray) {
+  const output =
+    new Uint8Array(
+      wordArray.sigBytes
+    );
+
+  for (
+    let i = 0;
+    i < wordArray.sigBytes;
+    i++
+  ) {
+    output[i] =
+      (
+        wordArray.words[i >>> 2] >>>
+        (24 - (i % 4) * 8)
+      ) & 255;
+  }
+
+  return output;
+}
+
+function generateFields(seed) {
+  let e = seed;
+  let l;
+
+  for (let i = 0; i < 3; i++) {
+    e = sha256hex(e + i);
+  }
+
+  l = e;
+
+  for (let i = 0; i < 3; i++) {
+    l = sha256hex(l + i);
+  }
+
+  return {
+    keyField:
+      "kf_" +
+      e.substring(8, 16),
+
+    ivField:
+      "ivf_" +
+      e.substring(16, 24),
+
+    containerName:
+      "cd_" +
+      e.substring(24, 32),
+
+    arrayName:
+      "ad_" +
+      e.substring(32, 40),
+
+    objectName:
+      "od_" +
+      e.substring(40, 48),
+
+    tokenField:
+      e.substring(48, 64) +
+      "_" +
+      e.substring(56, 64),
+
+    keyFrag2Field:
+      l.substring(0, 16) +
+      "_" +
+      l.substring(16, 24)
+  };
+}
+
+async function runWasm(
+  wasmBase64,
+  frag1,
+  keyFrag2,
+  tBytes,
+  seedInt
+) {
+  log("WASM START");
+
+  try {
+    const {
+      instance
+    } =
+      await WebAssembly.instantiate(
+        fromBase64(wasmBase64)
+      );
+
+    const {
+      _s,
+      _r,
+      memory
+    } = instance.exports;
+
+    if (
+      typeof _s !== "function" ||
+      typeof _r !== "function" ||
+      !memory
+    ) {
+      throw new Error(
+        "Invalid FlixCloud WASM exports"
+      );
+    }
+
+    const heap =
+      new Uint8Array(
+        memory.buffer
+      );
+
+    const length =
+      frag1.length;
+
+    const y = 1000;
+    const v = y + length;
+    const t = v + length;
+    const output = t + length;
+
+    heap.set(frag1, y);
+    heap.set(keyFrag2, v);
+    heap.set(tBytes, t);
+
+    log(
+      "WASM MEMORY",
+      `length=${length}`,
+      `seedInt=${seedInt}`
+    );
+
+    _s(seedInt);
+    _r(
+      y,
+      v,
+      t,
+      output,
+      length
+    );
+
+    log("WASM SUCCESS");
+
+    return heap.slice(
+      output,
+      output + length
+    );
+  } catch (e) {
+    err(
+      "WASM FAILED",
+      e?.stack || e?.message || e
+    );
+
+    throw e;
+  }
+}
+
+function extractSsrObject(html) {
+  const marker =
+    html.match(
+      /\{type:"data",data:(\{)/
+    );
+
+  if (!marker) {
+    throw new Error(
+      "SSR data block not found"
+    );
+  }
+
+  const start =
+    html.indexOf(
+      "{",
+      marker.index +
+      marker[0].length -
+      1
+    );
+
+  let depth = 0;
+
+  for (
+    let i = start;
+    i < html.length;
+    i++
+  ) {
+    if (html[i] === "{") {
+      depth++;
+    } else if (
+      html[i] === "}" &&
+      !--depth
+    ) {
+      return html.slice(
+        start,
+        i + 1
+      );
+    }
+  }
+
+  throw new Error(
+    "SSR brace matching failed"
+  );
+}
+
+function parseSsrData(html) {
+  return Function(
+    `"use strict";return(${extractSsrObject(html)});`
+  )();
+}
+
+async function resolveFlixCloud(embedUrl) {
+  section("FLIXCLOUD HLS");
+
+  log(
+    "FLIXCLOUD EMBED",
+    embedUrl
+  );
+
+  const match =
+    String(embedUrl).match(
+      /\/e\/([^?#\s]+)(?:\?v=(\d+))?/i
+    );
+
+  if (!match) {
+    throw new Error(
+      "Invalid FlixCloud embed URL"
+    );
+  }
+
+  const accessId = match[1];
+  const version =
+    Number(match[2]) || 2;
+
+  log(
+    "FLIXCLOUD ACCESS ID",
+    accessId
+  );
+
+  log(
+    "FLIXCLOUD VERSION",
+    version
+  );
+
+  const embedUrlFull =
+    `${FLIXCLOUD_BASE}/e/${accessId}?v=${version}`;
+
+  log(
+    "FLIXCLOUD EMBED REQUEST",
+    embedUrlFull
+  );
+
+  const response =
+    await fetch(
+      embedUrlFull,
+      {
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Accept": "*/*",
+          "Referer": "https://reanime.to/"
+        }
+      }
+    );
+
+  log(
+    "FLIXCLOUD EMBED HTTP",
+    response.status
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `FlixCloud HTTP ${response.status}`
+    );
+  }
+
+  const html =
+    await response.text();
+
+  log(
+    "FLIXCLOUD EMBED HTML",
+    `length=${html.length}`
+  );
+
+  const data =
+    parseSsrData(html);
+
+  const seed =
+    data?.obfuscation_seed;
+
+  if (!seed) {
+    throw new Error(
+      "Missing FlixCloud obfuscation seed"
+    );
+  }
+
+  log(
+    "FLIXCLOUD SEED FOUND",
+    `length=${seed.length}`
+  );
+
+  const fields =
+    generateFields(seed);
+
+  log(
+    "FLIXCLOUD FIELDS GENERATED"
+  );
+
+  const cryptoData =
+    data?.obfuscated_crypto_data;
+
+  if (!cryptoData) {
+    throw new Error(
+      "Missing obfuscated crypto data"
+    );
+  }
+
+  const container =
+    cryptoData[
+      fields.containerName
+    ];
+
+  const array =
+    container?.[
+      fields.arrayName
+    ];
+
+  const object =
+    array?.[0]?.[
+      fields.objectName
+    ];
+
+  if (!object) {
+    throw new Error(
+      "Missing FlixCloud crypto object"
+    );
+  }
+
+  const frag1 =
+    fromBase64(
+      object[fields.keyField]
+    );
+
+  const iv =
+    fromBase64(
+      object[fields.ivField]
+    );
+
+  const keyFrag2 =
+    fromBase64(
+      data[fields.keyFrag2Field]
+    );
+
+  const token =
+    data[fields.tokenField];
+
+  if (!token) {
+    throw new Error(
+      "Missing FlixCloud token"
+    );
+  }
+
+  log(
+    "FLIXCLOUD CRYPTO DATA FOUND",
+    `frag1=${frag1.length}`,
+    `iv=${iv.length}`,
+    `keyFrag2=${keyFrag2.length}`
+  );
+
+  log(
+    "FLIXCLOUD TOKEN FOUND"
+  );
+
+  const tokenUrl =
+    `${FLIXCLOUD_BASE}/api/m3u8/${token}`;
+
+  log(
+    "FLIXCLOUD M3U8 REQUEST",
+    tokenUrl
+  );
+
+  const tokenResponse =
+    await fetch(
+      tokenUrl,
+      {
+        headers: FLIX_HEADERS
+      }
+    );
+
+  log(
+    "FLIXCLOUD M3U8 HTTP",
+    tokenResponse.status
+  );
+
+  if (!tokenResponse.ok) {
+    throw new Error(
+      `FlixCloud M3U8 HTTP ${tokenResponse.status}`
+    );
+  }
+
+  const tokenData =
+    await tokenResponse.json();
+
+  const videoKey =
+    sha256hex(
+      token + "vid"
+    ).substring(0, 10);
+
+  const encryptionKey =
+    sha256hex(
+      token + "key"
+    ).substring(0, 10);
+
+  log(
+    "FLIXCLOUD TOKEN FIELDS",
+    `videoField=${videoKey}`,
+    `keyField=${encryptionKey}`
+  );
+
+  const videoBytes =
+    fromBase64(
+      tokenData[videoKey]
+    );
+
+  const tBytes =
+    fromBase64(
+      tokenData[encryptionKey]
+    );
+
+  if (
+    !videoBytes.length ||
+    !tBytes.length
+  ) {
+    throw new Error(
+      "Encrypted FlixCloud fields missing"
+    );
+  }
+
+  log(
+    "FLIXCLOUD ENCRYPTED DATA",
+    `video=${videoBytes.length}`,
+    `key=${tBytes.length}`
+  );
+
+  const seedInt =
+    parseInt(
+      seed.substring(0, 8),
+      16
+    );
+
+  const wasmOutput =
+    await runWasm(
+      data.w_payload,
+      frag1,
+      keyFrag2,
+      tBytes,
+      seedInt
+    );
+
+  log(
+    "FLIXCLOUD PBKDF2 START"
+  );
+
+  const derived =
+    CryptoJS.PBKDF2(
+      uint8ToWordArray(
+        wasmOutput
+      ),
+      CryptoJS.enc.Utf8.parse(
+        seed
+      ),
+      {
+        keySize: 8,
+        iterations: 1000,
+        hasher:
+          CryptoJS.algo.SHA256
+      }
+    );
+
+  const keyBytes =
+    wordArrayToUint8(
+      derived
+    );
+
+  for (
+    let i = 0;
+    i < 32;
+    i++
+  ) {
+    keyBytes[i] ^=
+      seed.charCodeAt(
+        i % seed.length
+      );
+  }
+
+  log(
+    "FLIXCLOUD AES DECRYPT START"
+  );
+
+  const decrypted =
+    CryptoJS.AES.decrypt(
+      {
+        ciphertext:
+          uint8ToWordArray(
+            videoBytes
+          )
+      },
+      CryptoJS.SHA256(
+        uint8ToWordArray(
+          keyBytes
+        )
+      ),
+      {
+        iv:
+          uint8ToWordArray(
+            iv
+          ),
+        mode:
+          CryptoJS.mode.CBC,
+        padding:
+          CryptoJS.pad.Pkcs7
+      }
+    );
+
+  const streamUrl =
+    CryptoJS.enc.Utf8
+      .stringify(decrypted)
+      .trim();
+
+  if (
+    !/^https?:\/\//i.test(
+      streamUrl
+    )
+  ) {
+    throw new Error(
+      "Invalid decrypted stream URL"
+    );
+  }
+
+  log(
+    "FLIXCLOUD HLS SUCCESS",
+    streamUrl
+  );
+
+  return {
+    url: streamUrl,
+    subtitles:
+      data.subtitles || [],
+    thumbnailsVtt:
+      data.thumbnails_vtt || null,
+    videoTitle:
+      data.video_title || null,
+    introChapter:
+      data.intro_chapter || null,
+    outroChapter:
+      data.outro_chapter || null,
+    videoId:
+      data.video_id || null,
     version
   };
 }
@@ -613,244 +1462,754 @@ async function resolveFlixCloud(embedUrl){
 // DIRECT MKV
 // =========================================================
 
-async function extractFlixCloudDownload(embedUrl){
-  try{
-    const aid=String(embedUrl).match(/\/e\/([a-z0-9]+)/i)?.[1];
-    if(!aid)return null;
+async function extractFlixCloudDownload(
+  embedUrl
+) {
+  section("FLIXCLOUD DIRECT MKV");
 
-    log("Checking direct MKV",aid);
-
-    const headers={
-      Accept:"*/*",
-      Referer:`${FLIXCLOUD_BASE}/`,
-      "User-Agent":UA
-    };
-
-    const res=await fetch(
-      `${FLIXCLOUD_BASE}/d/${aid}/__data.json`,
-      {headers}
+  try {
+    log(
+      "DIRECT MKV EMBED",
+      embedUrl
     );
 
-    log("Direct MKV HTTP",res.status);
+    const accessId =
+      String(embedUrl).match(
+        /\/e\/([a-z0-9]+)/i
+      )?.[1];
 
-    if(!res.ok)return null;
+    if (!accessId) {
+      log(
+        "DIRECT MKV INVALID ACCESS ID"
+      );
 
-    const body=await res.text();
-    const fileId=body.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
-    const token=body.match(/eyJ[\w-]+\.[\w-]+\.[\w-]+/)?.[0];
-    const base=body.match(/https:\/\/[a-z0-9-]+\.flixcloud\.cc/i)?.[0]||FLIXCLOUD_BASE;
-    const quality=body.match(/(\d{3,4}p)/)?.[1]||"1080p";
-    const size=body.match(/"(\d+(?:\.\d+)?\s*[KMG]B)"/i)?.[1]||"Unknown";
-
-    if(!fileId||!token){
-      log("Direct MKV data incomplete");
       return null;
     }
 
-    let ready=false;
+    log(
+      "DIRECT MKV ACCESS ID",
+      accessId
+    );
 
-    try{
-      const progress=await fetch(
-        `${base}/download/${fileId}/progress?token=${token}`,
-        {headers}
+    const headers = {
+      Accept: "*/*",
+      Referer:
+        `${FLIXCLOUD_BASE}/`,
+      "User-Agent":
+        USER_AGENT
+    };
+
+    const url =
+      `${FLIXCLOUD_BASE}/d/${accessId}/__data.json`;
+
+    log(
+      "DIRECT MKV REQUEST",
+      url
+    );
+
+    const response =
+      await fetch(
+        url,
+        { headers }
       );
 
-      if(progress.ok){
-        const text=await progress.text();
-        ready=text.includes('"status":"ready"')||text.includes('"ready"');
+    log(
+      "DIRECT MKV HTTP",
+      response.status
+    );
+
+    if (!response.ok) {
+      log(
+        "DIRECT MKV UNAVAILABLE",
+        response.status
+      );
+
+      return null;
+    }
+
+    const body =
+      await response.text();
+
+    log(
+      "DIRECT MKV DATA LENGTH",
+      body.length
+    );
+
+    const fileId =
+      body.match(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+      )?.[0];
+
+    const token =
+      body.match(
+        /eyJ[\w-]+\.[\w-]+\.[\w-]+/
+      )?.[0];
+
+    const base =
+      body.match(
+        /https:\/\/[a-z0-9-]+\.flixcloud\.cc/i
+      )?.[0] ||
+      FLIXCLOUD_BASE;
+
+    const quality =
+      body.match(
+        /(\d{3,4}p)/
+      )?.[1] ||
+      "1080p";
+
+    const size =
+      body.match(
+        /"(\d+(?:\.\d+)?\s*[KMG]B)"/i
+      )?.[1] ||
+      "Unknown";
+
+    log(
+      "DIRECT MKV PARSED",
+      `fileId=${fileId ? "YES" : "NO"}`,
+      `token=${token ? "YES" : "NO"}`,
+      `quality=${quality}`,
+      `size=${size}`,
+      `base=${base}`
+    );
+
+    if (!fileId || !token) {
+      log(
+        "DIRECT MKV INCOMPLETE DATA"
+      );
+
+      return null;
+    }
+
+    let ready = false;
+
+    try {
+      const progressUrl =
+        `${base}/download/${fileId}/progress` +
+        `?token=${token}`;
+
+      log(
+        "DIRECT MKV PROGRESS REQUEST"
+      );
+
+      const progress =
+        await fetch(
+          progressUrl,
+          { headers }
+        );
+
+      log(
+        "DIRECT MKV PROGRESS HTTP",
+        progress.status
+      );
+
+      if (progress.ok) {
+        const progressText =
+          await progress.text();
+
+        ready =
+          progressText.includes(
+            '"status":"ready"'
+          ) ||
+          progressText.includes(
+            '"ready"'
+          );
+
+        log(
+          "DIRECT MKV READY",
+          ready
+        );
       }
-    }catch{}
+    } catch (e) {
+      log(
+        "DIRECT MKV PROGRESS FAILED",
+        e?.message || String(e)
+      );
+    }
 
-    log("Direct MKV found",quality,size,`ready=${ready}`);
+    const downloadUrl =
+      `${base}/download/${fileId}?token=${token}`;
 
-    return{
-      url:`${base}/download/${fileId}?token=${token}`,
-      quality,size,type:"mkv",headers,ready
+    log(
+      "DIRECT MKV SUCCESS",
+      `quality=${quality}`,
+      `size=${size}`,
+      `ready=${ready}`
+    );
+
+    return {
+      url: downloadUrl,
+      quality,
+      size,
+      type: "mkv",
+      headers,
+      ready
     };
-  }catch(e){
-    log("Direct MKV failed",e?.message);
+  } catch (e) {
+    log(
+      "DIRECT MKV EXCEPTION",
+      e?.stack || e?.message || e
+    );
+
     return null;
   }
 }
 
 // =========================================================
-// MAIN
+// MAIN STREAM FUNCTION
 // =========================================================
 
-async function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
-  log("========================================");
-  log("START",`TMDB=${tmdbId}`,`type=${mediaType}`,`S${season}E${episode}`);
+async function getStreams(
+  tmdbId,
+  mediaType = "tv",
+  season = 1,
+  episode = 1
+) {
+  section("REANIME START");
 
-  try{
-    if(mediaType!=="tv"&&mediaType!=="movie"){
-      log("Unsupported media type");
-      return[];
+  log(
+    "INPUT",
+    `TMDB=${tmdbId}`,
+    `TYPE=${mediaType}`,
+    `S${season}E${episode}`
+  );
+
+  try {
+    if (
+      mediaType !== "tv" &&
+      mediaType !== "movie"
+    ) {
+      log(
+        "STOP: UNSUPPORTED MEDIA TYPE",
+        mediaType
+      );
+
+      return [];
     }
 
-    const movie=mediaType==="movie";
-    const seasonNumber=Number(season)||1;
-    const originalEpisode=movie?1:Number(episode)||1;
+    const isMovie =
+      mediaType === "movie";
 
-    const tmdb=await getTmdbInfo(tmdbId,mediaType);
+    const seasonNumber =
+      Number(season) || 1;
 
-    if(!tmdb?.imdbId){
-      log("STOP: No IMDb ID");
-      return[];
+    const originalEpisode =
+      isMovie
+        ? 1
+        : Number(episode) || 1;
+
+    // -----------------------------------------------------
+    // TMDB
+    // -----------------------------------------------------
+
+    const tmdb =
+      await getTmdbInfo(
+        tmdbId,
+        mediaType
+      );
+
+    if (!tmdb) {
+      log(
+        "STOP: TMDB LOOKUP FAILED"
+      );
+
+      return [];
     }
 
-    log("IMDb resolved",tmdb.imdbId);
+    if (!tmdb.imdbId) {
+      log(
+        "STOP: NO IMDb ID",
+        `TMDB=${tmdbId}`,
+        `TITLE=${tmdb.title}`
+      );
 
-    const mapping=await resolveImdbToAnilist({
-      imdbId:tmdb.imdbId,
-      type:movie?"movie":"show",
-      season:seasonNumber,
-      episode:originalEpisode
-    });
-
-    if(!mapping?.anilistId){
-      log("STOP: No AniList mapping");
-      return[];
+      return [];
     }
-
-    const mappedEpisode=Number(mapping.episode)||originalEpisode;
 
     log(
-      "Mapping complete",
-      `AniList=${mapping.anilistId}`,
-      `episode=${mappedEpisode}`
+      "IMDb RESOLVED",
+      tmdb.imdbId
     );
 
-    const slug=await getReanimeSlug(tmdbId,mediaType);
-    const settings=globalThis.SCRAPER_SETTINGS||{};
-    const languages=[];
+    // -----------------------------------------------------
+    // FRIBB
+    // -----------------------------------------------------
 
-    if(settings.reanime_sub!==false)languages.push("sub");
-    if(settings.reanime_dub!==false)languages.push("dub");
+    const mapping =
+      await resolveFribbMapping({
+        tmdbId,
+        mediaType: isMovie
+          ? "movie"
+          : "tv",
+        season: seasonNumber,
+        episode: originalEpisode
+      });
 
-    log("Languages",languages.join(","));
+    if (!mapping?.anilistId) {
+      log(
+        "STOP: NO FRIBB AniList MAPPING"
+      );
 
-    const serversByLang={};
+      return [];
+    }
 
-    for(const language of languages){
-      try{
-        const result=await getFlixEmbeds(
-          slug,
-          mappedEpisode,
+    const mappedEpisode =
+      Number(mapping.episode) ||
+      originalEpisode;
+
+    log(
+      "MAPPING COMPLETE",
+      `TMDB=${tmdbId}`,
+      `IMDb=${tmdb.imdbId}`,
+      `AniList=${mapping.anilistId}`,
+      `InputEpisode=${originalEpisode}`,
+      `MappedEpisode=${mappedEpisode}`
+    );
+
+    // -----------------------------------------------------
+    // CINEMETA
+    // -----------------------------------------------------
+
+    const slug =
+      await getReanimeSlug(
+        tmdbId,
+        mediaType
+      );
+
+    log(
+      "REANIME SLUG",
+      slug || "NOT FOUND"
+    );
+
+    // -----------------------------------------------------
+    // SETTINGS
+    // -----------------------------------------------------
+
+    const settings =
+      globalThis.SCRAPER_SETTINGS || {};
+
+    const languages = [];
+
+    if (
+      settings.reanime_sub !== false
+    ) {
+      languages.push("sub");
+    }
+
+    if (
+      settings.reanime_dub !== false
+    ) {
+      languages.push("dub");
+    }
+
+    log(
+      "LANGUAGE SETTINGS",
+      JSON.stringify(settings)
+    );
+
+    log(
+      "LANGUAGES",
+      languages.join(",") ||
+        "NONE"
+    );
+
+    if (!languages.length) {
+      log(
+        "STOP: NO LANGUAGES ENABLED"
+      );
+
+      return [];
+    }
+
+    // -----------------------------------------------------
+    // REANIME SERVER DISCOVERY
+    // -----------------------------------------------------
+
+    const serversByLanguage =
+      Object.create(null);
+
+    for (
+      const language of languages
+    ) {
+      try {
+        const result =
+          await getFlixEmbeds(
+            slug,
+            mappedEpisode,
+            language,
+            mapping.anilistId
+          );
+
+        if (
+          result?.servers?.length
+        ) {
+          serversByLanguage[
+            language
+          ] = result.servers;
+
+          log(
+            "SERVERS STORED",
+            language,
+            result.servers.length
+          );
+        } else {
+          log(
+            "NO SERVERS",
+            language
+          );
+        }
+      } catch (e) {
+        log(
+          "SERVER DISCOVERY FAILED",
           language,
-          mapping.anilistId
+          e?.message || String(e)
         );
-
-        if(result.servers?.length)
-          serversByLang[language]=result.servers;
-      }catch(e){
-        log("Language failed",language,e?.message);
       }
     }
 
-    if(!Object.keys(serversByLang).length){
-      log("STOP: No servers");
-      return[];
+    const languagesWithServers =
+      Object.keys(
+        serversByLanguage
+      );
+
+    if (
+      !languagesWithServers.length
+    ) {
+      log(
+        "STOP: NO REANIME SERVERS"
+      );
+
+      return [];
     }
 
     log(
-      "Servers found",
-      Object.entries(serversByLang)
-        .map(([k,v])=>`${k}=${v.length}`)
+      "SERVER SUMMARY",
+      languagesWithServers
+        .map(
+          language =>
+            `${language}=${serversByLanguage[language].length}`
+        )
         .join(" ")
     );
 
-    const tasks=[];
-    const streams=[];
-    const seen=new Set();
+    // -----------------------------------------------------
+    // STREAM RESOLUTION
+    // -----------------------------------------------------
 
-    for(const language of languages){
-      const servers=serversByLang[language]||[];
+    const tasks = [];
 
-      for(let i=0;i<servers.length;i++){
-        const server=servers[i];
-        const dataLink=server?.dataLink;
-        if(!dataLink)continue;
+    for (
+      const language of languages
+    ) {
+      const servers =
+        serversByLanguage[
+          language
+        ] || [];
 
-        const serverName=server.serverName||`HD-${i+1}`;
-        const langUpper=language.toUpperCase();
-        const title=movie
-          ?`${tmdb.title} (${langUpper})`
-          :`${tmdb.title} - Episode ${originalEpisode} (${langUpper})`;
+      for (
+        let index = 0;
+        index < servers.length;
+        index++
+      ) {
+        const server =
+          servers[index];
 
-        tasks.push((async()=>{
-          try{
-            const direct=await extractFlixCloudDownload(dataLink);
+        const dataLink =
+          server?.dataLink;
 
-            if(direct?.url)
-              return{
-                name:`Reanime [${langUpper}] ${serverName} (${direct.quality})`,
-                title,url:direct.url,
-                quality:direct.quality,
-                size:direct.size,
-                headers:direct.headers,
-                provider:"reanime",
-                type:"mkv"
-              };
-          }catch(e){
-            log("MKV exception",e?.message);
-          }
+        if (!dataLink) {
+          log(
+            "SERVER SKIPPED: NO DATALINK",
+            language,
+            index + 1
+          );
 
-          try{
-            const resolved=await resolveFlixCloud(dataLink);
+          continue;
+        }
 
-            if(resolved?.url)
-              return{
-                name:`Reanime [${langUpper}] ${serverName} (Auto)`,
-                title,url:resolved.url,
-                quality:"Auto",
-                provider:"reanime",
-                type:"m3u8",
-                subtitles:resolved.subtitles||[]
-              };
-          }catch(e){
-            log("HLS exception",e?.message);
-          }
+        const serverName =
+          server.serverName ||
+          `HD-${index + 1}`;
 
-          return null;
-        })());
+        const languageUpper =
+          language.toUpperCase();
+
+        const title =
+          isMovie
+            ? `${tmdb.title} (${languageUpper})`
+            : `${tmdb.title} - Episode ${originalEpisode} (${languageUpper})`;
+
+        log(
+          "QUEUE SERVER",
+          `language=${language}`,
+          `server=${serverName}`,
+          `dataLink=${dataLink}`
+        );
+
+        tasks.push(
+          (async () => {
+            // ------------------------------------------------
+            // DIRECT MKV
+            // ------------------------------------------------
+
+            try {
+              const direct =
+                await extractFlixCloudDownload(
+                  dataLink
+                );
+
+              if (
+                direct?.url
+              ) {
+                log(
+                  "STREAM SUCCESS: DIRECT MKV",
+                  serverName,
+                  direct.quality
+                );
+
+                return {
+                  name:
+                    `Reanime [${languageUpper}] ` +
+                    `${serverName} ` +
+                    `(${direct.quality})`,
+
+                  title,
+                  url: direct.url,
+                  quality:
+                    direct.quality,
+                  size:
+                    direct.size,
+                  headers:
+                    direct.headers,
+                  provider:
+                    "reanime",
+                  type:
+                    "mkv"
+                };
+              }
+
+              log(
+                "DIRECT MKV NOT AVAILABLE",
+                serverName
+              );
+            } catch (e) {
+              log(
+                "DIRECT MKV EXCEPTION",
+                serverName,
+                e?.message || String(e)
+              );
+            }
+
+            // ------------------------------------------------
+            // HLS
+            // ------------------------------------------------
+
+            try {
+              const resolved =
+                await resolveFlixCloud(
+                  dataLink
+                );
+
+              if (
+                resolved?.url
+              ) {
+                log(
+                  "STREAM SUCCESS: HLS",
+                  serverName
+                );
+
+                return {
+                  name:
+                    `Reanime [${languageUpper}] ` +
+                    `${serverName} (Auto)`,
+
+                  title,
+                  url:
+                    resolved.url,
+                  quality:
+                    "Auto",
+                  provider:
+                    "reanime",
+                  type:
+                    "m3u8",
+                  subtitles:
+                    resolved.subtitles ||
+                    []
+                };
+              }
+
+              log(
+                "HLS RESOLVER RETURNED NO URL",
+                serverName
+              );
+            } catch (e) {
+              log(
+                "HLS EXCEPTION",
+                serverName,
+                e?.stack ||
+                  e?.message ||
+                  e
+              );
+            }
+
+            log(
+              "SERVER FAILED COMPLETELY",
+              serverName,
+              language
+            );
+
+            return null;
+          })()
+        );
       }
     }
 
-    log("Resolving",tasks.length,"stream(s)");
-
-    const results=await Promise.all(tasks);
-
-    for(const result of results){
-      if(result?.url&&!seen.has(result.name)){
-        seen.add(result.name);
-        streams.push(result);
-      }
-    }
-
-    const rank={
-      auto:4000,
-      adaptive:4000,
-      "2160p":2160,
-      "4k":2160,
-      "1080p":1080,
-      "720p":720,
-      "480p":480,
-      "360p":360,
-      unknown:0
-    };
-
-    streams.sort((a,b)=>
-      (rank[String(b.quality||"").toLowerCase()]||0)-
-      (rank[String(a.quality||"").toLowerCase()]||0)
+    log(
+      "STREAM TASK COUNT",
+      tasks.length
     );
 
-    log("DONE",`${streams.length} stream(s)`);
-    log("========================================");
+    if (!tasks.length) {
+      log(
+        "STOP: NO STREAM TASKS"
+      );
+
+      return [];
+    }
+
+    const results =
+      await Promise.all(tasks);
+
+    const streams = [];
+    const seen = new Set();
+
+    for (
+      const result of results
+    ) {
+      if (
+        !result?.url
+      ) {
+        continue;
+      }
+
+      if (
+        seen.has(result.name)
+      ) {
+        log(
+          "DUPLICATE STREAM SKIPPED",
+          result.name
+        );
+
+        continue;
+      }
+
+      seen.add(result.name);
+      streams.push(result);
+    }
+
+    // -----------------------------------------------------
+    // QUALITY SORT
+    // -----------------------------------------------------
+
+    const qualityRank = {
+      auto: 4000,
+      adaptive: 4000,
+      "2160p": 2160,
+      "4k": 2160,
+      "1080p": 1080,
+      "720p": 720,
+      "480p": 480,
+      "360p": 360,
+      unknown: 0
+    };
+
+    streams.sort(
+      (a, b) => {
+        const aQuality =
+          String(
+            a?.quality || "unknown"
+          ).toLowerCase();
+
+        const bQuality =
+          String(
+            b?.quality || "unknown"
+          ).toLowerCase();
+
+        return (
+          (
+            qualityRank[bQuality] ||
+            0
+          ) -
+          (
+            qualityRank[aQuality] ||
+            0
+          )
+        );
+      }
+    );
+
+    // -----------------------------------------------------
+    // FINAL LOGGING
+    // -----------------------------------------------------
+
+    section("REANIME FINAL RESULT");
+
+    log(
+      "STREAM COUNT",
+      streams.length
+    );
+
+    for (
+      let i = 0;
+      i < streams.length;
+      i++
+    ) {
+      const stream =
+        streams[i];
+
+      log(
+        `STREAM ${i + 1}`,
+        JSON.stringify({
+          name: stream.name,
+          quality: stream.quality,
+          type: stream.type,
+          provider: stream.provider,
+          size: stream.size || null
+        })
+      );
+    }
+
+    log(
+      "FINAL ID CHAIN",
+      `TMDB=${tmdbId}`,
+      `IMDb=${tmdb.imdbId}`,
+      `AniList=${mapping.anilistId}`,
+      `Episode=${mappedEpisode}`
+    );
+
+    log(
+      "ACTIVE REANIME DOMAIN",
+      activeBaseUrl
+    );
+
+    log(
+      "DONE",
+      `${streams.length} stream(s)`
+    );
+
+    log(
+      "========================================"
+    );
 
     return streams;
-  }catch(e){
-    err("FATAL",e?.stack||e?.message||e);
-    return[];
+  } catch (e) {
+    err(
+      "FATAL GETSTREAMS ERROR",
+      e?.stack ||
+        e?.message ||
+        e
+    );
+
+    return [];
   }
 }
 
@@ -858,12 +2217,28 @@ async function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
 // SETTINGS
 // =========================================================
 
-async function onSettings(){
-  return[
-    {type:"header",label:"Reanime"},
-    {type:"toggle",key:"reanime_sub",label:"Subtitles",defaultValue:true},
-    {type:"toggle",key:"reanime_dub",label:"Dub",defaultValue:true}
+async function onSettings() {
+  return [
+    {
+      type: "header",
+      label: "Reanime"
+    },
+    {
+      type: "toggle",
+      key: "reanime_sub",
+      label: "Subtitles",
+      defaultValue: true
+    },
+    {
+      type: "toggle",
+      key: "reanime_dub",
+      label: "Dub",
+      defaultValue: true
+    }
   ];
 }
 
-module.exports={getStreams,onSettings};
+module.exports = {
+  getStreams,
+  onSettings
+};
