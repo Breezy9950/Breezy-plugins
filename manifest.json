@@ -14,7 +14,7 @@
       "hasSettings": true,
       "formats": ["m3u8", "mkv"],
       "logo": "https://www.google.com/s2/favicons?domain=reanime.to&sz=128",
-      "contentLanguage": ["en"]
+      "contentLanguage": ["en", "ja"]
     }
   ]
 }
