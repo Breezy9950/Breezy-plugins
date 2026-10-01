@@ -11,14 +11,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect AniBridge
+      - name: Inspect AniBridge TMDB Mapping
         run: |
           cat > inspect.js <<'EOF'
           const url =
             "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
 
           console.log("========================================");
-          console.log("ANIBRIDGE SCHEMA DIAGNOSTIC");
+          console.log("ANIBRIDGE TMDB DIAGNOSTIC");
           console.log("========================================");
 
           const response = await fetch(url, {
@@ -36,124 +36,91 @@ jobs:
 
           const raw = await response.json();
 
-          const keys = Object.keys(raw);
-
-          console.log("Total entries:", keys.length);
-
           // ========================================
-          // COUNT SOURCE PROVIDERS
+          // TEST TMDB SHOW
           // ========================================
 
-          const providers = {};
+          const tmdbId = "5114";
+          const season = 1;
 
-          for (const key of keys) {
-            const provider = key.split(":")[0];
-
-            providers[provider] =
-              (providers[provider] || 0) + 1;
-          }
-
-          console.log("");
-          console.log("---- SOURCE PROVIDERS ----");
-
-          for (const [provider, count] of Object.entries(providers)) {
-            console.log(`${provider}: ${count}`);
-          }
-
-          // ========================================
-          // FIND OUR TEST IMDb ID
-          // ========================================
-
-          const testId = "tt0324431";
+          const key = `tmdb_show:${tmdbId}:s${season}`;
 
           console.log("");
           console.log("========================================");
-          console.log(`SEARCHING FOR ${testId}`);
+          console.log("TEST MAPPING");
           console.log("========================================");
 
-          const matchingKeys = keys.filter(key =>
-            key.includes(testId)
+          console.log("TMDB ID:", tmdbId);
+          console.log("Season:", season);
+          console.log("Lookup key:", key);
+
+          const entry = raw[key];
+
+          console.log("");
+          console.log("ENTRY:");
+
+          if (entry) {
+            console.log(JSON.stringify(entry, null, 2));
+          } else {
+            console.log("NOT FOUND");
+          }
+
+          // ========================================
+          // FIND ALL TMDB 5114 ENTRIES
+          // ========================================
+
+          console.log("");
+          console.log("========================================");
+          console.log("ALL TMDB 5114 ENTRIES");
+          console.log("========================================");
+
+          const matches = Object.entries(raw).filter(
+            ([source]) =>
+              source === `tmdb_show:${tmdbId}:s0` ||
+              source === `tmdb_show:${tmdbId}:s1` ||
+              source === `tmdb_show:${tmdbId}:s2` ||
+              source === `tmdb_show:${tmdbId}:s3` ||
+              source === `tmdb_show:${tmdbId}:s4` ||
+              source === `tmdb_show:${tmdbId}:s5`
           );
 
-          console.log("Matches:", matchingKeys.length);
+          console.log("Matches:", matches.length);
 
-          for (const key of matchingKeys) {
+          for (const [source, targets] of matches) {
             console.log("");
-            console.log("KEY:", key);
+            console.log("SOURCE:", source);
             console.log(
-              "VALUE:",
-              JSON.stringify(raw[key])
+              "TARGETS:",
+              JSON.stringify(targets, null, 2)
             );
           }
 
           // ========================================
-          // SHOW TARGETS
+          // TEST IMDb TOO
           // ========================================
 
           console.log("");
           console.log("========================================");
-          console.log("ENTRIES CONTAINING SHOW TARGETS");
+          console.log("TEST IMDb tt0324431");
           console.log("========================================");
 
-          let showTargetCount = 0;
+          const imdbId = "tt0324431";
 
-          for (const key of keys) {
-            const value = raw[key];
+          const imdbMatches = Object.entries(raw).filter(
+            ([source, targets]) =>
+              source.includes(imdbId) ||
+              JSON.stringify(targets).includes(imdbId)
+          );
 
-            if (!value || typeof value !== "object") {
-              continue;
-            }
+          console.log("Matches:", imdbMatches.length);
 
-            const targets = Object.keys(value);
-
-            const hasShowTarget = targets.some(target =>
-              target.startsWith("tmdb_show:") ||
-              target.startsWith("tvdb_show:") ||
-              target.startsWith("imdb_show:")
+          for (const [source, targets] of imdbMatches.slice(0, 20)) {
+            console.log("");
+            console.log("SOURCE:", source);
+            console.log(
+              "TARGETS:",
+              JSON.stringify(targets, null, 2)
             );
-
-            if (hasShowTarget) {
-              showTargetCount++;
-
-              if (showTargetCount <= 20) {
-                console.log("");
-                console.log("SOURCE:", key);
-                console.log(
-                  "TARGETS:",
-                  JSON.stringify(value)
-                );
-              }
-            }
-          }
-
-          console.log("");
-          console.log(
-            "Total entries containing show targets:",
-            showTargetCount
-          );
-
-          // ========================================
-          // IMDb SOURCE EXAMPLES
-          // ========================================
-
-          console.log("");
-          console.log("========================================");
-          console.log("ALL IMDb SOURCE KEY TYPES");
-          console.log("========================================");
-
-          const imdbKeys = keys.filter(key =>
-            key.startsWith("imdb:")
-            || key.startsWith("imdb_movie:")
-            || key.startsWith("imdb_show:")
-          );
-
-          console.log(
-            "IMDb source keys:",
-            imdbKeys.length
-          );
-
-          for (const key of imdbKeys.slice(0, 30)) {
-            console.log(key);
           }
 
           console.log("");
