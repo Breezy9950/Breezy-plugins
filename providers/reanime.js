@@ -24,7 +24,7 @@ async function fetchText(url,options={}){
  throw last||new Error(`Request failed: ${url}`);
 }
 async function fetchJson(url,options={}){
- const t=await fetchText(url,{...options,headers:{"Accept":"application/json, text/plain, */*"...options.headers}});
+ const t=await fetchText(url,{...options,headers:{"Accept":"application/json, text/plain, */*",(options.headers||{})}});
  try{return JSON.parse(t)}catch(e){throw new Error(`Invalid JSON from ${url}: ${e?.message||e}`)}
 }
 function tmdbBase(t){return`https://api.themoviedb.org/3/${t==="movie"?"movie":"tv"}`}
