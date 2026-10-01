@@ -1,0 +1,290 @@
+const CryptoJS=require("crypto-js");
+
+const REANIME_DOMAINS=["https://reanime.to","https://reanime.cz","https://reanime.wtf"];
+const FLIXCLOUD_BASE="https://flixcloud.cc";
+const TMDB_API_KEY="439c478a771f35c05022f9feabcca01c";
+const ANILIST_URL="https://graphql.anilist.co";
+const CINEMETA_URL="https://v3-cinemeta.strem.io/meta";
+const UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const HEADERS={"User-Agent":UA,"Accept":"application/json, text/plain, */*"};
+const FLIX_HEADERS={"User-Agent":UA,"Accept":"*/*","Origin":FLIXCLOUD_BASE,"Referer":`${FLIXCLOUD_BASE}/`};
+
+let activeBaseUrl=REANIME_DOMAINS[0];
+const log=(...a)=>console.log("[Reanime-AniZip]",...a);
+const err=(...a)=>console.error("[Reanime-AniZip]",...a);
+
+function abs(path,base=activeBaseUrl){
+  if(!path)return"";
+  if(/^https?:\/\//i.test(path))return path;
+  return`${base}${path.startsWith("/")?"":"/"}${path}`;
+}
+
+async function text(url,opt={}){
+  const absolute=/^https?:\/\//i.test(url);
+  const urls=absolute?[url]:REANIME_DOMAINS.map(d=>abs(url,d));
+  let last;
+  for(const u of urls){
+    try{
+      const r=await fetch(u,{...opt,headers:{...HEADERS,...(opt.headers||{})}});
+      log("HTTP",r.status,u);
+      if(r.ok){
+        if(!absolute)activeBaseUrl=new URL(u).origin;
+        return r.text();
+      }
+      last=new Error(`HTTP ${r.status}`);
+    }catch(e){last=e;log("HTTP error",u,e?.message)}
+  }
+  throw last||new Error(`Failed: ${url}`);
+}
+
+async function json(url,opt={}){
+  return JSON.parse(await text(url,{
+    ...opt,
+    headers:{"Accept":"application/json, text/plain, */*",...(opt.headers||{})}
+  }));
+}
+
+async function tmdb(id,type){
+  try{
+    const t=type==="movie"?"movie":"tv";
+    const d=await json(`https://api.themoviedb.org/3/${t}/${id}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`);
+    return{
+      title:d?.name||d?.title||d?.original_name||d?.original_title||"Anime",
+      year:(d?.first_air_date||d?.release_date||"").slice(0,4),
+      imdbId:d?.external_ids?.imdb_id||null
+    };
+  }catch(e){err("TMDB failed",e?.message);return null}
+}
+
+function norm(s){
+  return String(s||"").toLowerCase()
+    .replace(/[^a-z0-9]+/g," ").trim();
+}
+
+async function aniListSearch(title,year){
+  const query=`query($search:String){Page(page:1,perPage:15){media(search:$search,type:ANIME){id title{romaji english native}startDate{year}format}}}`;
+  try{
+    const r=await fetch(ANILIST_URL,{
+      method:"POST",
+      headers:{"Content-Type":"application/json","Accept":"application/json"},
+      body:JSON.stringify({query,variables:{search:title}})
+    });
+    if(!r.ok)return[];
+    return(await r.json())?.data?.Page?.media||[];
+  }catch(e){log("AniList search failed",e?.message);return[]}
+}
+
+async function aniZipMap(anilistId){
+  try{
+    const r=await fetch(`https://api.ani.zip/v1/mappings?anilist_id=${anilistId}`,{
+      headers:{Accept:"application/json","User-Agent":UA}
+    });
+    log("AniZip mapping HTTP",r.status);
+    if(!r.ok)return null;
+    return r.json();
+  }catch(e){log("AniZip failed",e?.message);return null}
+}
+
+async function resolveMapping(tmdbId,type,season,episode,title,year){
+  log("Mapping via AniZip",tmdbId,`S${season}E${episode}`);
+
+  const candidates=await aniListSearch(title,year);
+  let best=null,bestScore=-1;
+
+  for(const a of candidates){
+    const names=[a?.title?.romaji,a?.title?.english,a?.title?.native];
+    let score=0;
+
+    if(names.some(n=>norm(n)===norm(title)))score+=100;
+    if(year&&a?.startDate?.year===Number(year))score+=30;
+    if(a?.format==="TV"||a?.format==="ONA"||a?.format==="OVA")score+=5;
+
+    const map=await aniZipMap(a.id);
+    const mappedId=String(map?.mappings?.themoviedb_id||"");
+    if(mappedId===String(tmdbId))score+=100;
+
+    if(type==="movie"&&a?.format==="MOVIE")score+=20;
+    if(score>bestScore){
+      bestScore=score;
+      best={anilistId:a.id,episode:Number(episode)||1,map};
+    }
+  }
+
+  if(!best||bestScore<100){
+    log("AniZip mapping not found",bestScore);
+    return null;
+  }
+
+  log("AniZip mapped",best.anilistId,`E${best.episode}`,`score=${bestScore}`);
+  return{anilistId:String(best.anilistId),episode:best.episode,source:"anizip"};
+}
+
+function slugify(v){
+  return String(v||"").toLowerCase().replace(/['’]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+}
+
+async function getSlug(id,type){
+  try{
+    const t=type==="movie"?"movie":"tv";
+    const d=await json(`${CINEMETA_URL}/${t}/tmdb:${id}.json`);
+    return d?.meta?.slug||slugify(d?.meta?.name||d?.meta?.title);
+  }catch(e){log("Cinemeta failed",e?.message);return null}
+}
+
+function serversOf(v,l){
+  return Array.isArray(v)?v.filter(s=>s?.dataType?.toLowerCase()===l):[];
+}
+
+async function flix(slug,ep,lang,aid){
+  const watch=`/watch/${slug||"anime"}?ep=${ep}`;
+  try{
+    const d=await json(`/api/flix/${aid}/${ep}`,{headers:{Referer:abs(watch)}});
+    if(d?.success&&Array.isArray(d.servers)){
+      const s=serversOf(d.servers,lang);
+      if(s.length)return s;
+    }
+  }catch(e){log("Flix primary failed",e?.message)}
+
+  if(!slug)return[];
+  try{
+    const a=await json(`/api/v1/anime/${slug}`);
+    if(a?.anilist_id){
+      const d=await json(`/api/flix/${a.anilist_id}/${ep}`,{headers:{Referer:abs(watch)}});
+      if(d?.success)return serversOf(d.servers,lang);
+    }
+  }catch(e){log("Slug API failed",e?.message)}
+
+  return[];
+}
+
+function sha(v){return CryptoJS.SHA256(CryptoJS.enc.Utf8.parse(String(v))).toString(CryptoJS.enc.Hex)}
+function b64(v){return Uint8Array.from(atob(String(v)),c=>c.charCodeAt(0))}
+function u8w(b){
+  const w=[];
+  for(let i=0;i<b.length;i++)w[i>>>2]=(w[i>>>2]||0)|(b[i]<<(24-(i%4)*8));
+  return CryptoJS.lib.WordArray.create(w,b.length);
+}
+function wu8(w){
+  const b=new Uint8Array(w.sigBytes);
+  for(let i=0;i<w.sigBytes;i++)b[i]=(w.words[i>>>2]>>>(24-(i%4)*8))&255;
+  return b;
+}
+function fields(seed){
+  let e=seed,l;
+  for(let i=0;i<3;i++)e=sha(e+i);
+  l=e;
+  for(let i=0;i<3;i++)l=sha(l+i);
+  return{
+    k:"kf_"+e.slice(8,16),iv:"ivf_"+e.slice(16,24),
+    c:"cd_"+e.slice(24,32),a:"ad_"+e.slice(32,40),
+    o:"od_"+e.slice(40,48),t:e.slice(48,64)+"_"+e.slice(56,64),
+    k2:l.slice(0,16)+"_"+l.slice(16,24)
+  };
+}
+
+async function wasm(payload,f1,k2,T,seed){
+  const{instance}=await WebAssembly.instantiate(b64(payload));
+  const{_s,_r,memory}=instance.exports;
+  if(typeof _s!=="function"||typeof _r!=="function"||!memory)throw Error("Invalid WASM");
+  const h=new Uint8Array(memory.buffer),n=f1.length,y=1000,v=y+n,t=v+n,o=t+n;
+  h.set(f1,y);h.set(k2,v);h.set(T,t);_s(seed);_r(y,v,t,o,n);
+  return h.slice(o,o+n);
+}
+
+function ssr(html){
+  const m=html.match(/\{type:"data",data:(\{)/);
+  if(!m)throw Error("SSR data missing");
+  const s=html.indexOf("{",m.index+m[0].length-1);
+  let d=0;
+  for(let i=s;i<html.length;i++){
+    if(html[i]==="{")d++;
+    else if(html[i]==="}"&&! --d)return html.slice(s,i+1);
+  }
+  throw Error("SSR parse failed");
+}
+
+async function hls(url){
+  const m=String(url).match(/\/e\/([^?#\s]+)(?:\?v=(\d+))?/i);
+  if(!m)throw Error("Invalid embed");
+  const id=m[1],ver=Number(m[2])||2;
+  const r=await fetch(`${FLIXCLOUD_BASE}/e/${id}?v=${ver}`,{headers:{"User-Agent":UA,Accept:"*/*",Referer:"https://reanime.to/"}});
+  if(!r.ok)throw Error(`FlixCloud HTTP ${r.status}`);
+  const d=Function(`"use strict";return(${ssr(await r.text())});`)();
+  const f=fields(d.obfuscation_seed),c=d.obfuscated_crypto_data;
+  const o=c?.[f.c]?.[f.a]?.[0]?.[f.o];
+  if(!o)throw Error("Crypto object missing");
+  const frag=b64(o[f.k]),iv=b64(o[f.iv]),k2=b64(d[f.k2]),token=d[f.t];
+  const tr=await fetch(`${FLIXCLOUD_BASE}/api/m3u8/${token}`,{headers:FLIX_HEADERS});
+  if(!tr.ok)throw Error(`M3U8 HTTP ${tr.status}`);
+  const td=await tr.json();
+  const vb=b64(td[sha(token+"vid").slice(0,10)]),T=b64(td[sha(token+"key").slice(0,10)]);
+  const wo=await wasm(d.w_payload,frag,k2,T,parseInt(d.obfuscation_seed.slice(0,8),16));
+  const p=CryptoJS.PBKDF2(u8w(wo),CryptoJS.enc.Utf8.parse(d.obfuscation_seed),{keySize:8,iterations:1000,hasher:CryptoJS.algo.SHA256});
+  const x=wu8(p);
+  for(let i=0;i<32;i++)x[i]^=d.obfuscation_seed.charCodeAt(i%d.obfuscation_seed.length);
+  const out=CryptoJS.enc.Utf8.stringify(CryptoJS.AES.decrypt({ciphertext:u8w(vb)},CryptoJS.SHA256(u8w(x)),{iv:u8w(iv),mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.Pkcs7})).trim();
+  if(!/^https?:\/\//i.test(out))throw Error("Bad HLS URL");
+  return{url:out,subtitles:d.subtitles||[]};
+}
+
+async function download(embed){
+  try{
+    const id=String(embed).match(/\/e\/([a-z0-9]+)/i)?.[1];
+    if(!id)return null;
+    const headers={Accept:"*/*",Referer:`${FLIXCLOUD_BASE}/`,"User-Agent":UA};
+    const r=await fetch(`${FLIXCLOUD_BASE}/d/${id}/__data.json`,{headers});
+    if(!r.ok)return null;
+    const b=await r.text();
+    const file=b.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+    const token=b.match(/eyJ[\w-]+\.[\w-]+\.[\w-]+/)?.[0];
+    const base=b.match(/https:\/\/[a-z0-9-]+\.flixcloud\.cc/i)?.[0]||FLIXCLOUD_BASE;
+    const q=b.match(/(\d{3,4}p)/)?.[1]||"1080p";
+    const size=b.match(/"(\d+(?:\.\d+)?\s*[KMG]B)"/i)?.[1]||"Unknown";
+    if(!file||!token)return null;
+    return{url:`${base}/download/${file}?token=${token}`,quality:q,size,headers};
+  }catch(e){log("MKV failed",e?.message);return null}
+}
+
+async function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
+  log("START",`TMDB=${tmdbId}`,`S${season}E${episode}`);
+  try{
+    if(!["tv","movie"].includes(mediaType))return[];
+    const movie=mediaType==="movie",s=Number(season)||1,e=movie?1:Number(episode)||1;
+    const info=await tmdb(tmdbId,mediaType);
+    if(!info)return[];
+    const map=await resolveMapping(tmdbId,movie?"movie":"tv",s,e,info.title,info.year);
+    if(!map)return[];
+    const slug=await getSlug(tmdbId,mediaType);
+    const settings=globalThis.SCRAPER_SETTINGS||{};
+    const langs=[];
+    if(settings.reanime_sub!==false)langs.push("sub");
+    if(settings.reanime_dub!==false)langs.push("dub");
+    const servers=[];
+    for(const l of langs){
+      for(const s of await flix(slug,map.episode,l,map.anilistId)){
+        if(s?.dataLink)servers.push({s,l});
+      }
+    }
+    const tasks=servers.map(async({s,l})=>{
+      const q=await download(s.dataLink);
+      if(q)return{name:`Reanime [${l.toUpperCase()}] ${s.serverName||"HD"} (${q.quality})`,title:info.title,url:q.url,quality:q.quality,size:q.size,headers:q.headers,provider:"reanime",type:"mkv"};
+      try{
+        const h=await hls(s.dataLink);
+        return{name:`Reanime [${l.toUpperCase()}] ${s.serverName||"HD"} (Auto)`,title:info.title,url:h.url,quality:"Auto",provider:"reanime",type:"m3u8",subtitles:h.subtitles};
+      }catch(e){log("HLS failed",e?.message);return null}
+    });
+    const out=(await Promise.all(tasks)).filter(Boolean);
+    log("DONE",out.length);
+    return out;
+  }catch(e){err("FATAL",e?.stack||e?.message);return[]}
+}
+
+async function onSettings(){
+  return[
+    {type:"header",label:"Reanime"},
+    {type:"toggle",key:"reanime_sub",label:"Subtitles",defaultValue:true},
+    {type:"toggle",key:"reanime_dub",label:"Dub",defaultValue:true}
+  ];
+}
+
+module.exports={getStreams,onSettings};
