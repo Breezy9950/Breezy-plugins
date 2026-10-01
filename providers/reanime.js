@@ -486,6 +486,11 @@ async function resolveFribbMapping({
     return null;
   }
 
+  log(
+    "FRIBB ROW COUNT",
+    rows.length
+  );
+
   const targetTmdbId =
     String(tmdbId);
 
@@ -499,14 +504,20 @@ async function resolveFribbMapping({
     Number(episode) || 1;
 
   log(
-    "FRIBB SEARCH",
-    `TMDB=${targetTmdbId}`,
-    isMovie
-      ? "MOVIE"
-      : `TV SEASON=${targetSeason} EPISODE=${targetEpisode}`
+    "FRIBB SEARCH TARGET",
+    JSON.stringify({
+      tmdbId: targetTmdbId,
+      mediaType,
+      season: targetSeason,
+      episode: targetEpisode
+    })
   );
 
-  const matches = [];
+  // =======================================================
+  // DIAGNOSTIC: FIND EVERY RAW TMDB MATCH
+  // =======================================================
+
+  const rawMatches = [];
 
   for (const entry of rows) {
     if (
@@ -538,161 +549,436 @@ async function resolveFribbMapping({
         targetTmdbId
       );
 
-    if (isMovie) {
-      if (!movieMatch) {
-        continue;
-      }
-    } else {
-      if (!tvMatch) {
-        continue;
-      }
-
-      const fribbSeason =
-        getFribbSeason(entry);
-
-      if (
-        fribbSeason !== null &&
-        fribbSeason !== targetSeason
-      ) {
-        continue;
-      }
-    }
-
     if (
-      entry.anilist_id ===
-        undefined ||
-      entry.anilist_id ===
-        null ||
-      entry.anilist_id === ""
+      (isMovie && movieMatch) ||
+      (!isMovie && tvMatch)
     ) {
-      log(
-        "FRIBB MATCH WITHOUT ANILIST",
-        JSON.stringify({
-          tmdb: tmdbIds,
-          season:
-            entry?.season,
-          anilist_id:
-            entry?.anilist_id
-        })
-      );
-
-      continue;
+      rawMatches.push(entry);
     }
-
-    matches.push(entry);
   }
 
   log(
-    "FRIBB MATCH COUNT",
-    matches.length
+    "FRIBB RAW TMDB MATCH COUNT",
+    rawMatches.length
   );
 
-  if (!matches.length) {
+  // Print every raw match so we can see exactly
+  // what Fribb contains for this TMDB ID.
+  for (
+    let i = 0;
+    i < rawMatches.length;
+    i++
+  ) {
+    const candidate =
+      rawMatches[i];
+
     log(
-      "FRIBB NO MAPPING",
-      `TMDB=${targetTmdbId}`,
-      isMovie
-        ? "movie"
-        : `S${targetSeason}E${targetEpisode}`
+      `FRIBB RAW CANDIDATE ${i + 1}`,
+      JSON.stringify({
+        type:
+          candidate?.type ??
+          null,
+
+        anidb_id:
+          candidate?.anidb_id ??
+          null,
+
+        anilist_id:
+          candidate?.anilist_id ??
+          null,
+
+        mal_id:
+          candidate?.mal_id ??
+          null,
+
+        imdb_id:
+          candidate?.imdb_id ??
+          null,
+
+        themoviedb_id:
+          candidate?.themoviedb_id ??
+          null,
+
+        season:
+          candidate?.season ??
+          null,
+
+        episode_offset:
+          candidate?.episode_offset ??
+          null
+      })
+    );
+  }
+
+  // =======================================================
+  // NO RAW MATCH
+  // =======================================================
+
+  if (!rawMatches.length) {
+    log(
+      "FRIBB NO RAW TMDB MATCH",
+      JSON.stringify({
+        tmdbId:
+          targetTmdbId,
+        mediaType,
+        requestedSeason:
+          targetSeason,
+        requestedEpisode:
+          targetEpisode
+      })
+    );
+
+    // Diagnostic: find entries containing the same
+    // numeric ID anywhere in their TMDB object.
+    const looseMatches = [];
+
+    for (const entry of rows) {
+      const ids =
+        entry?.themoviedb_id;
+
+      if (
+        !ids ||
+        typeof ids !== "object"
+      ) {
+        continue;
+      }
+
+      const serialized =
+        JSON.stringify(ids);
+
+      if (
+        serialized.includes(
+          targetTmdbId
+        )
+      ) {
+        looseMatches.push(
+          entry
+        );
+      }
+    }
+
+    log(
+      "FRIBB LOOSE TMDB MATCH COUNT",
+      looseMatches.length
+    );
+
+    for (
+      let i = 0;
+      i < Math.min(
+        looseMatches.length,
+        10
+      );
+      i++
+    ) {
+      const candidate =
+        looseMatches[i];
+
+      log(
+        `FRIBB LOOSE CANDIDATE ${i + 1}`,
+        JSON.stringify({
+          type:
+            candidate?.type ??
+            null,
+
+          anidb_id:
+            candidate?.anidb_id ??
+            null,
+
+          anilist_id:
+            candidate?.anilist_id ??
+            null,
+
+          themoviedb_id:
+            candidate?.themoviedb_id ??
+            null,
+
+          season:
+            candidate?.season ??
+            null
+        })
+      );
+    }
+
+    return null;
+  }
+
+  // =======================================================
+  // MOVIE
+  // =======================================================
+
+  if (isMovie) {
+    const movieCandidates =
+      rawMatches.filter(
+        entry =>
+          entry?.anilist_id !==
+            undefined &&
+          entry?.anilist_id !==
+            null &&
+          entry?.anilist_id !==
+            ""
+      );
+
+    log(
+      "FRIBB MOVIE VALID CANDIDATES",
+      movieCandidates.length
+    );
+
+    for (
+      let i = 0;
+      i < movieCandidates.length;
+      i++
+    ) {
+      const candidate =
+        movieCandidates[i];
+
+      log(
+        `FRIBB MOVIE CANDIDATE ${i + 1}`,
+        JSON.stringify({
+          anilist_id:
+            candidate?.anilist_id ??
+            null,
+
+          anidb_id:
+            candidate?.anidb_id ??
+            null,
+
+          type:
+            candidate?.type ??
+            null,
+
+          imdb_id:
+            candidate?.imdb_id ??
+            null,
+
+          tmdb:
+            candidate?.themoviedb_id ??
+            null
+        })
+      );
+    }
+
+    if (
+      movieCandidates.length
+    ) {
+      const entry =
+        movieCandidates[0];
+
+      const anilistId =
+        String(
+          entry.anilist_id
+        );
+
+      log(
+        "FRIBB MOVIE MAPPING SUCCESS",
+        `AniList=${anilistId}`
+      );
+
+      return {
+        anilistId,
+        episode: 1,
+        source: "fribb"
+      };
+    }
+
+    log(
+      "FRIBB MOVIE MATCHES EXIST BUT NONE HAVE ANILIST ID"
     );
 
     return null;
   }
 
-  if (matches.length > 1) {
-    log(
-      "FRIBB MULTIPLE MATCHES",
-      matches.length
+  // =======================================================
+  // TV
+  // =======================================================
+
+  const withAniList =
+    rawMatches.filter(
+      entry =>
+        entry?.anilist_id !==
+          undefined &&
+        entry?.anilist_id !==
+          null &&
+        entry?.anilist_id !==
+          ""
     );
 
-    for (
-      let i = 0;
-      i < matches.length;
-      i++
-    ) {
-      const candidate =
-        matches[i];
+  log(
+    "FRIBB TV CANDIDATES WITH ANILIST",
+    withAniList.length
+  );
 
-      log(
-        "FRIBB CANDIDATE",
-        i + 1,
-        JSON.stringify({
-          anilist_id:
-            candidate?.anilist_id,
-          season:
-            candidate?.season,
-          episode_offset:
-            candidate?.episode_offset,
-          tmdb:
-            candidate?.themoviedb_id
-        })
-      );
-    }
+  // =======================================================
+  // EXACT SEASON MATCHES
+  // =======================================================
+
+  const exactSeasonMatches =
+    withAniList.filter(
+      entry => {
+        const fribbSeason =
+          getFribbSeason(
+            entry
+          );
+
+        return (
+          fribbSeason !== null &&
+          fribbSeason ===
+            targetSeason
+        );
+      }
+    );
+
+  log(
+    "FRIBB EXACT SEASON MATCH COUNT",
+    exactSeasonMatches.length
+  );
+
+  for (
+    let i = 0;
+    i < exactSeasonMatches.length;
+    i++
+  ) {
+    const candidate =
+      exactSeasonMatches[i];
+
+    log(
+      `FRIBB EXACT SEASON CANDIDATE ${i + 1}`,
+      JSON.stringify({
+        anilist_id:
+          candidate?.anilist_id ??
+          null,
+
+        type:
+          candidate?.type ??
+          null,
+
+        season:
+          candidate?.season ??
+          null,
+
+        episode_offset:
+          candidate?.episode_offset ??
+          null,
+
+        tmdb:
+          candidate?.themoviedb_id ??
+          null,
+
+        imdb:
+          candidate?.imdb_id ??
+          null
+      })
+    );
   }
 
-  const entry =
-    matches[0];
+  // =======================================================
+  // EXACT SEASON RESULT
+  // =======================================================
 
-  const offset =
-    getFribbEpisodeOffset(
-      entry
+  if (
+    exactSeasonMatches.length
+  ) {
+    const entry =
+      exactSeasonMatches[0];
+
+    const offset =
+      getFribbEpisodeOffset(
+        entry
+      );
+
+    const mappedEpisode =
+      targetEpisode +
+      offset;
+
+    const anilistId =
+      String(
+        entry.anilist_id
+      );
+
+    log(
+      "FRIBB EXACT SEASON SUCCESS"
     );
 
-  const mappedEpisode =
-    isMovie
-      ? 1
-      : targetEpisode + offset;
-
-  const anilistId =
-    String(
-      entry.anilist_id
+    log(
+      "FRIBB AniList ID",
+      anilistId
     );
 
+    log(
+      "FRIBB SEASON",
+      targetSeason
+    );
+
+    log(
+      "FRIBB EPISODE OFFSET",
+      offset
+    );
+
+    log(
+      "FRIBB OUTPUT EPISODE",
+      mappedEpisode
+    );
+
+    return {
+      anilistId,
+      episode:
+        mappedEpisode,
+      source:
+        "fribb"
+    };
+  }
+
+  // =======================================================
+  // NO EXACT SEASON
+  // =======================================================
+
   log(
-    "FRIBB MAPPING SUCCESS"
+    "FRIBB NO EXACT SEASON MATCH"
   );
 
   log(
-    "FRIBB TMDB ID",
-    targetTmdbId
+    "FRIBB ALL TV CANDIDATES",
+    withAniList.length
   );
 
-  log(
-    "FRIBB AniList ID",
-    anilistId
-  );
+  for (
+    let i = 0;
+    i < withAniList.length;
+    i++
+  ) {
+    const candidate =
+      withAniList[i];
 
-  log(
-    "FRIBB TMDB SEASON",
-    isMovie
-      ? "movie"
-      : targetSeason
-  );
+    log(
+      `FRIBB TV FALLBACK CANDIDATE ${i + 1}`,
+      JSON.stringify({
+        anilist_id:
+          candidate?.anilist_id ??
+          null,
 
-  log(
-    "FRIBB INPUT EPISODE",
-    isMovie
-      ? "movie"
-      : targetEpisode
-  );
+        type:
+          candidate?.type ??
+          null,
 
-  log(
-    "FRIBB EPISODE OFFSET",
-    offset
-  );
+        season:
+          candidate?.season ??
+          null,
 
-  log(
-    "FRIBB OUTPUT EPISODE",
-    mappedEpisode
-  );
+        episode_offset:
+          candidate?.episode_offset ??
+          null,
 
-  return {
-    anilistId,
-    episode:
-      mappedEpisode,
-    source:
-      "fribb"
-  };
+        tmdb:
+          candidate?.themoviedb_id ??
+          null,
+
+        imdb:
+          candidate?.imdb_id ??
+          null
+      })
+    );
+  }
+
+  return null;
 }
 
 // =========================================================
