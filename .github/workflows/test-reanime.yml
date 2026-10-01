@@ -2,30 +2,6 @@ name: Test ReAnime
 
 on:
   workflow_dispatch:
-    inputs:
-      tmdb_id:
-        description: "TMDB ID"
-        required: true
-        type: string
-        default: "5114"
-      type:
-        description: "Media type"
-        required: true
-        type: choice
-        options:
-          - tv
-          - movie
-        default: tv
-      season:
-        description: "Season"
-        required: true
-        type: string
-        default: "1"
-      episode:
-        description: "Episode"
-        required: true
-        type: string
-        default: "1"
 
 jobs:
   test:
@@ -35,59 +11,68 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install CryptoJS
+      - name: Install crypto-js
         run: npm install crypto-js
 
-      - name: Run ReAnime
-        env:
-          TMDB_ID: ${{ inputs.tmdb_id }}
-          TYPE: ${{ inputs.type }}
-          SEASON: ${{ inputs.season }}
-          EPISODE: ${{ inputs.episode }}
+      - name: Inspect AniBridge
         run: |
-          cat > test.js <<'EOF'
-          const {getStreams}=require("./providers/reanime.js");
-
-          const tmdbId=process.env.TMDB_ID;
-          const type=process.env.TYPE;
-          const season=Number(process.env.SEASON);
-          const episode=Number(process.env.EPISODE);
+          cat > inspect.js <<'EOF'
+          const url =
+            "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
 
           console.log("========================================");
-          console.log("REANIME TEST");
-          console.log("TMDB:",tmdbId);
-          console.log("Type:",type);
-          console.log("Season:",season);
-          console.log("Episode:",episode);
+          console.log("ANIBRIDGE DIAGNOSTIC");
           console.log("========================================");
 
-          (async()=>{
-            try{
-              const start=Date.now();
-              const streams=await getStreams(
-                tmdbId,
-                type,
-                season,
-                episode
-              );
-
-              console.log("========================================");
-              console.log("RESULT");
-              console.log("Time:",`${Date.now()-start}ms`);
-              console.log("Streams:",streams.length);
-              console.dir(streams,{depth:null});
-              console.log("========================================");
-            }catch(e){
-              console.error("TEST FAILED");
-              console.error(e?.stack||e);
-              process.exitCode=1;
+          const response = await fetch(url, {
+            headers: {
+              Accept: "application/json",
+              "User-Agent": "Reanime-Nuvio-Test/1.0"
             }
-          })();
+          });
+
+          console.log("HTTP:", response.status);
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const raw = await response.json();
+
+          console.log("Total entries:", Object.keys(raw).length);
+
+          const imdbEntries = Object.entries(raw)
+            .filter(([key]) => key.startsWith("imdb_"));
+
+          console.log("IMDb entries:", imdbEntries.length);
+
+          console.log("");
+          console.log("---- FIRST 20 IMDb ENTRIES ----");
+
+          for (const [key, value] of imdbEntries.slice(0, 20)) {
+            console.log("");
+            console.log("KEY:", key);
+            console.log("VALUE:", JSON.stringify(value));
+          }
+
+          console.log("");
+          console.log("---- SHOW ENTRIES ----");
+
+          const imdbShows = imdbEntries
+            .filter(([key]) => key.startsWith("imdb_show:"));
+
+          console.log("IMDb show entries:", imdbShows.length);
+
+          for (const [key, value] of imdbShows.slice(0, 20)) {
+            console.log("");
+            console.log("SHOW KEY:", key);
+            console.log("SHOW VALUE:", JSON.stringify(value));
+          }
+
+          console.log("");
+          console.log("========================================");
+          console.log("DONE");
+          console.log("========================================");
           EOF
 
-          node test.js
+          node inspect.js
