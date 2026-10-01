@@ -30,7 +30,7 @@ jobs:
         with:
           ref: ${{ matrix.branch }}
 
-      - name: Show test information
+      - name: Show provider
         run: |
           echo "========================================"
           echo "MAPPING PROVIDER TEST"
@@ -39,17 +39,15 @@ jobs:
           echo "File   : ${{ matrix.file }}"
           echo "========================================"
 
-      - name: Check provider file
+      - name: Check provider
         run: |
           if [ ! -f "${{ matrix.file }}" ]; then
             echo "ERROR: Provider file does not exist!"
-            echo
-            echo "Contents of providers/:"
             find providers -maxdepth 1 -type f -print
             exit 1
           fi
 
-          echo "Provider file found:"
+          echo "Provider found:"
           ls -lh "${{ matrix.file }}"
 
       - name: Install dependencies
@@ -59,65 +57,66 @@ jobs:
         env:
           TEST_FILE: ${{ matrix.file }}
           TEST_NAME: ${{ matrix.name }}
-          TEST_BRANCH: ${{ matrix.branch }}
         run: |
           node <<'NODE'
           const fs = require("fs");
 
           const file = process.env.TEST_FILE;
           const method = process.env.TEST_NAME;
-          const branch = process.env.TEST_BRANCH;
+
+          const TMDB_API_KEY =
+            "439c478a771f35c05022f9feabcca01c";
 
           console.log("");
           console.log("========================================");
           console.log("LOADING PROVIDER");
           console.log("Method :", method);
-          console.log("Branch :", branch);
           console.log("File   :", file);
           console.log("========================================");
-
-          if (!fs.existsSync(file)) {
-            throw new Error("Provider file does not exist: " + file);
-          }
 
           const provider = require("./" + file);
 
           if (!provider || typeof provider.getStreams !== "function") {
-            throw new Error(
-              "Provider does not export getStreams()"
-            );
+            throw new Error("Provider does not export getStreams()");
           }
 
           console.log("[TEST] getStreams() found");
 
-          const TMDB_API_KEY =
-            "439c478a771f35c05022f9feabcca01c";
+          // --------------------------------------------------
+          // Search TMDB instead of hard-coding TMDB IDs.
+          // This prevents another incorrect-ID test.
+          // --------------------------------------------------
 
-          const cases = [
-            {
-              name: "Jujutsu Kaisen 0",
-              tmdbId: "820232",
-              type: "movie",
-              season: null,
-              episode: null
-            },
-            {
-              name: "DanMachi S1 OVA",
-              tmdbId: "62741",
-              type: "tv",
-              season: 1,
-              episode: 14
-            },
-            {
-              name: "Jujutsu Kaisen S2E1",
-              tmdbId: "95479",
-              type: "tv",
-              season: 2,
-              episode: 1
+          async function searchTMDB(query, type) {
+            const url =
+              `https://api.themoviedb.org/3/search/${type}` +
+              `?api_key=${TMDB_API_KEY}` +
+              `&query=${encodeURIComponent(query)}`;
+
+            const res = await fetch(url);
+
+            console.log(
+              `[TMDB SEARCH] HTTP ${res.status} ${url}`
+            );
+
+            if (!res.ok) {
+              throw new Error(
+                `TMDB search failed: HTTP ${res.status}`
+              );
             }
-          ];
 
-          async function tmdbInfo(id, type) {
+            const json = await res.json();
+
+            if (!json.results || !json.results.length) {
+              throw new Error(
+                `No TMDB result for ${query}`
+              );
+            }
+
+            return json.results[0];
+          }
+
+          async function getTMDB(id, type) {
             const url =
               `https://api.themoviedb.org/3/${type}/${id}` +
               `?api_key=${TMDB_API_KEY}` +
@@ -131,14 +130,14 @@ jobs:
 
             if (!res.ok) {
               throw new Error(
-                `TMDB request failed: ${res.status}`
+                `TMDB lookup failed: HTTP ${res.status}`
               );
             }
 
             return res.json();
           }
 
-          async function aniListInfo(id) {
+          async function getAniList(id) {
             const query = `
               query ($id: Int) {
                 Media(id: $id) {
@@ -170,10 +169,6 @@ jobs:
               }
             );
 
-            console.log(
-              `[AniList] HTTP ${res.status} for ${id}`
-            );
-
             if (!res.ok) {
               return null;
             }
@@ -183,6 +178,33 @@ jobs:
             return json?.data?.Media || null;
           }
 
+          // --------------------------------------------------
+          // We deliberately search by title so the workflow
+          // itself determines the correct TMDB ID.
+          // --------------------------------------------------
+
+          const cases = [
+            {
+              label: "Jujutsu Kaisen 0",
+              search: "Jujutsu Kaisen 0",
+              type: "movie"
+            },
+            {
+              label: "DanMachi S1 OVA",
+              search: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+              type: "tv",
+              season: 1,
+              episode: 14
+            },
+            {
+              label: "Jujutsu Kaisen S2E1",
+              search: "Jujutsu Kaisen",
+              type: "tv",
+              season: 2,
+              episode: 1
+            }
+          ];
+
           async function runCase(test) {
             console.log("");
             console.log("");
@@ -190,161 +212,137 @@ jobs:
               "########################################"
             );
             console.log(
-              `CASE: ${test.name}`
+              `CASE: ${test.label}`
             );
             console.log(
               "########################################"
             );
 
-            console.log("");
-            console.log("INPUT");
-            console.log("  Type    :", test.type);
-            console.log("  TMDB ID :", test.tmdbId);
+            // ------------------------------------------------
+            // Find TMDB entry
+            // ------------------------------------------------
 
-            if (test.season !== null) {
+            const searchResult =
+              await searchTMDB(
+                test.search,
+                test.type
+              );
+
+            const tmdbId =
+              String(searchResult.id);
+
+            console.log("");
+            console.log("TMDB SEARCH RESULT");
+            console.log(
+              "  ID   :",
+              tmdbId
+            );
+            console.log(
+              "  Name :",
+              searchResult.name ||
+              searchResult.title
+            );
+
+            // ------------------------------------------------
+            // Full TMDB details + IMDb
+            // ------------------------------------------------
+
+            const tmdb =
+              await getTMDB(
+                tmdbId,
+                test.type
+              );
+
+            const imdb =
+              tmdb?.external_ids?.imdb_id ||
+              "NONE";
+
+            console.log("");
+            console.log("TMDB DETAILS");
+            console.log(
+              "  TMDB ID :",
+              tmdb.id
+            );
+            console.log(
+              "  Name    :",
+              tmdb.name ||
+              tmdb.title ||
+              "UNKNOWN"
+            );
+            console.log(
+              "  Original:",
+              tmdb.original_name ||
+              tmdb.original_title ||
+              "UNKNOWN"
+            );
+            console.log(
+              "  IMDb    :",
+              imdb
+            );
+
+            if (test.season !== undefined) {
               console.log(
                 "  Season  :",
                 test.season
               );
-
               console.log(
                 "  Episode :",
                 test.episode
               );
             }
 
-            console.log("");
-            console.log("TMDB LOOKUP");
-
-            const tmdb = await tmdbInfo(
-              test.tmdbId,
-              test.type
-            );
-
-            const imdb =
-              tmdb?.external_ids?.imdb_id || "NONE";
-
-            console.log(
-              "  TMDB ID :",
-              tmdb?.id ?? test.tmdbId
-            );
-
-            console.log(
-              "  Name    :",
-              tmdb?.name ||
-              tmdb?.title ||
-              "UNKNOWN"
-            );
-
-            console.log(
-              "  Original:",
-              tmdb?.original_name ||
-              tmdb?.original_title ||
-              "UNKNOWN"
-            );
-
-            console.log(
-              "  IMDb    :",
-              imdb
-            );
+            // ------------------------------------------------
+            // Call mapping provider.
+            //
+            // IMPORTANT:
+            // The provider may continue into ReAnime and
+            // eventually return [], so we also inspect logs.
+            // ------------------------------------------------
 
             console.log("");
-            console.log("MAPPING");
+            console.log("MAPPING TEST");
 
             try {
               let result;
 
               if (test.type === "movie") {
-                result = await provider.getStreams(
-                  test.tmdbId,
-                  "movie"
-                );
+                result =
+                  await provider.getStreams(
+                    tmdbId,
+                    "movie"
+                  );
               } else {
-                result = await provider.getStreams(
-                  test.tmdbId,
-                  "tv",
-                  test.season,
-                  test.episode
-                );
+                result =
+                  await provider.getStreams(
+                    tmdbId,
+                    "tv",
+                    test.season,
+                    test.episode
+                  );
               }
 
               console.log("");
               console.log(
-                `[${method}] Provider returned:`
+                `[${method}] FINAL PROVIDER RESULT`
               );
 
               console.log(
-                JSON.stringify(result, null, 2)
+                JSON.stringify(
+                  result,
+                  null,
+                  2
+                )
               );
 
-              /*
-               * Try to discover AniList IDs from the
-               * returned object without assuming one
-               * particular provider output structure.
-               */
-              const jsonText =
-                JSON.stringify(result || {});
-
-              const ids = [
-                ...jsonText.matchAll(
-                  /(?:anilist(?:_id|Id)?|aniListId)[^0-9]{0,20}([0-9]{3,})/gi
-                )
-              ].map(m => m[1]);
-
-              const uniqueIds =
-                [...new Set(ids)];
-
-              if (uniqueIds.length === 0) {
-                console.log("");
-                console.log(
-                  `[${method}] No AniList ID found in provider result.`
-                );
-              } else {
-                console.log("");
-
-                for (const id of uniqueIds) {
-                  const media =
-                    await aniListInfo(id);
-
-                  console.log(
-                    `[${method}] AniList ID: ${id}`
-                  );
-
-                  if (media) {
-                    console.log(
-                      `[${method}] AniList type: ${media.type}`
-                    );
-
-                    console.log(
-                      `[${method}] AniList format: ${media.format}`
-                    );
-
-                    console.log(
-                      `[${method}] AniList title (English):`,
-                      media.title?.english || "NONE"
-                    );
-
-                    console.log(
-                      `[${method}] AniList title (Romaji):`,
-                      media.title?.romaji || "NONE"
-                    );
-
-                    console.log(
-                      `[${method}] AniList title (Native):`,
-                      media.title?.native || "NONE"
-                    );
-                  } else {
-                    console.log(
-                      `[${method}] AniList lookup returned no Media.`
-                    );
-                  }
-                }
-              }
+              console.log("");
+              console.log(
+                `[${method}] Provider returned ${Array.isArray(result) ? result.length : 0} streams`
+              );
 
             } catch (error) {
               console.error("");
               console.error(
-                `[${method}] MAPPING ERROR`
+                `[${method}] PROVIDER ERROR`
               );
               console.error(
                 error?.stack || error
@@ -356,7 +354,7 @@ jobs:
               "########################################"
             );
             console.log(
-              `END CASE: ${test.name}`
+              `END CASE: ${test.label}`
             );
             console.log(
               "########################################"
@@ -381,13 +379,7 @@ jobs:
           })().catch(error => {
             console.error("");
             console.error(
-              "========================================"
-            );
-            console.error(
               "FATAL TEST ERROR"
-            );
-            console.error(
-              "========================================"
             );
             console.error(
               error?.stack || error
