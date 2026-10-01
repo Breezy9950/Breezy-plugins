@@ -11,14 +11,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect AniBridge TMDB Mapping
+      - name: Inspect AniBridge Reverse Mapping
         run: |
           cat > inspect.js <<'EOF'
           const url =
             "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
 
           console.log("========================================");
-          console.log("ANIBRIDGE TMDB DIAGNOSTIC");
+          console.log("ANIBRIDGE REVERSE MAPPING DIAGNOSTIC");
           console.log("========================================");
 
           const response = await fetch(url, {
@@ -37,89 +37,187 @@ jobs:
           const raw = await response.json();
 
           // ========================================
-          // TEST TMDB SHOW
+          // SEARCH TARGETS
           // ========================================
 
           const tmdbId = "5114";
           const season = 1;
 
-          const key = `tmdb_show:${tmdbId}:s${season}`;
+          const target =
+            `tmdb_show:${tmdbId}:s${season}`;
 
           console.log("");
           console.log("========================================");
-          console.log("TEST MAPPING");
+          console.log("SEARCH TARGET");
           console.log("========================================");
 
-          console.log("TMDB ID:", tmdbId);
-          console.log("Season:", season);
-          console.log("Lookup key:", key);
+          console.log("Target:", target);
 
-          const entry = raw[key];
+          const matches = [];
 
-          console.log("");
-          console.log("ENTRY:");
+          for (const [source, targets] of Object.entries(raw)) {
+            if (!targets || typeof targets !== "object") {
+              continue;
+            }
 
-          if (entry) {
-            console.log(JSON.stringify(entry, null, 2));
-          } else {
-            console.log("NOT FOUND");
+            for (const [targetKey, mapping] of Object.entries(targets)) {
+              if (targetKey === target) {
+                matches.push({
+                  source,
+                  target: targetKey,
+                  mapping
+                });
+              }
+            }
           }
 
-          // ========================================
-          // FIND ALL TMDB 5114 ENTRIES
-          // ========================================
-
           console.log("");
-          console.log("========================================");
-          console.log("ALL TMDB 5114 ENTRIES");
-          console.log("========================================");
-
-          const matches = Object.entries(raw).filter(
-            ([source]) =>
-              source === `tmdb_show:${tmdbId}:s0` ||
-              source === `tmdb_show:${tmdbId}:s1` ||
-              source === `tmdb_show:${tmdbId}:s2` ||
-              source === `tmdb_show:${tmdbId}:s3` ||
-              source === `tmdb_show:${tmdbId}:s4` ||
-              source === `tmdb_show:${tmdbId}:s5`
-          );
-
           console.log("Matches:", matches.length);
 
-          for (const [source, targets] of matches) {
+          for (const match of matches.slice(0, 50)) {
             console.log("");
-            console.log("SOURCE:", source);
+            console.log("SOURCE:", match.source);
+            console.log("TARGET:", match.target);
             console.log(
-              "TARGETS:",
-              JSON.stringify(targets, null, 2)
+              "MAPPING:",
+              JSON.stringify(match.mapping, null, 2)
             );
           }
 
           // ========================================
-          // TEST IMDb TOO
+          // SEARCH ALL SEASONS FOR TMDB 5114
           // ========================================
 
           console.log("");
           console.log("========================================");
-          console.log("TEST IMDb tt0324431");
+          console.log("ALL TMDB 5114 TARGETS");
+          console.log("========================================");
+
+          const allMatches = [];
+
+          for (const [source, targets] of Object.entries(raw)) {
+            if (!targets || typeof targets !== "object") {
+              continue;
+            }
+
+            for (const [targetKey, mapping] of Object.entries(targets)) {
+              if (targetKey.startsWith(`tmdb_show:${tmdbId}:`)) {
+                allMatches.push({
+                  source,
+                  target: targetKey,
+                  mapping
+                });
+              }
+            }
+          }
+
+          console.log(
+            "All TMDB 5114 matches:",
+            allMatches.length
+          );
+
+          for (const match of allMatches) {
+            console.log("");
+            console.log("SOURCE:", match.source);
+            console.log("TARGET:", match.target);
+            console.log(
+              "MAPPING:",
+              JSON.stringify(match.mapping)
+            );
+          }
+
+          // ========================================
+          // SEARCH IMDb tt0324431 ANYWHERE
+          // ========================================
+
+          console.log("");
+          console.log("========================================");
+          console.log("SEARCH IMDb tt0324431 ANYWHERE");
           console.log("========================================");
 
           const imdbId = "tt0324431";
+          const imdbNeedle = `imdb_movie:${imdbId}`;
 
-          const imdbMatches = Object.entries(raw).filter(
-            ([source, targets]) =>
-              source.includes(imdbId) ||
-              JSON.stringify(targets).includes(imdbId)
+          const imdbMatches = [];
+
+          for (const [source, targets] of Object.entries(raw)) {
+
+            if (source === imdbNeedle) {
+              imdbMatches.push({
+                location: "SOURCE",
+                source,
+                targets
+              });
+              continue;
+            }
+
+            if (!targets || typeof targets !== "object") {
+              continue;
+            }
+
+            for (const [targetKey, mapping] of Object.entries(targets)) {
+              if (targetKey === imdbNeedle) {
+                imdbMatches.push({
+                  location: "TARGET",
+                  source,
+                  target: targetKey,
+                  mapping
+                });
+              }
+            }
+          }
+
+          console.log(
+            "IMDb matches:",
+            imdbMatches.length
           );
 
-          console.log("Matches:", imdbMatches.length);
-
-          for (const [source, targets] of imdbMatches.slice(0, 20)) {
+          for (const match of imdbMatches.slice(0, 20)) {
             console.log("");
-            console.log("SOURCE:", source);
             console.log(
-              "TARGETS:",
-              JSON.stringify(targets, null, 2)
+              JSON.stringify(match, null, 2)
+            );
+          }
+
+          // ========================================
+          // FIND ANILIST CONNECTIONS FOR TMDB 5114
+          // ========================================
+
+          console.log("");
+          console.log("========================================");
+          console.log("ANILIST CONNECTIONS");
+          console.log("========================================");
+
+          const anilistConnections = [];
+
+          for (const match of allMatches) {
+            const source = match.source;
+            const targets = raw[source];
+
+            if (!targets || typeof targets !== "object") {
+              continue;
+            }
+
+            for (const [targetKey, mapping] of Object.entries(targets)) {
+              if (targetKey.startsWith("anilist:")) {
+                anilistConnections.push({
+                  source,
+                  anilist: targetKey,
+                  mapping
+                });
+              }
+            }
+          }
+
+          console.log(
+            "AniList connections:",
+            anilistConnections.length
+          );
+
+          for (const connection of anilistConnections) {
+            console.log("");
+            console.log(
+              JSON.stringify(connection, null, 2)
             );
           }
 
