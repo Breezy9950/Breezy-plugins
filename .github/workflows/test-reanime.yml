@@ -1,389 +1,143 @@
-name: Test ReAnime Mapping Methods
+name: Test ReAnime Fribb
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: ${{ matrix.name }}
+  test-reanime:
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: AniZip
-            branch: Breezy9950-patch-1
-            file: providers/AniZip
-
-          - name: Fribb
-            branch: Breezy9950-patch-2
-            file: providers/Fribb Anime Lists
-
-          - name: AniMap
-            branch: Breezy9950-patch-3
-            file: providers/AniMap
-
     steps:
-      - name: Checkout provider branch
+      - name: Checkout Fribb branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.branch }}
+          ref: Breezy9950-patch-2
 
-      - name: Show provider
-        run: |
-          echo "========================================"
-          echo "MAPPING PROVIDER TEST"
-          echo "Method : ${{ matrix.name }}"
-          echo "Branch : ${{ matrix.branch }}"
-          echo "File   : ${{ matrix.file }}"
-          echo "========================================"
-
-      - name: Check provider
-        run: |
-          if [ ! -f "${{ matrix.file }}" ]; then
-            echo "ERROR: Provider file does not exist!"
-            find providers -maxdepth 1 -type f -print
-            exit 1
-          fi
-
-          echo "Provider found:"
-          ls -lh "${{ matrix.file }}"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Install dependencies
         run: npm install crypto-js
 
-      - name: Run mapping tests
-        env:
-          TEST_FILE: ${{ matrix.file }}
-          TEST_NAME: ${{ matrix.name }}
+      - name: Verify provider file
         run: |
-          node <<'NODE'
-          const fs = require("fs");
+          echo "========================================"
+          echo "REANIME FRIBB PROVIDER TEST"
+          echo "========================================"
+          echo "Branch : Breezy9950-patch-2"
+          echo "File   : providers/reanime.js"
+          echo "========================================"
 
-          const file = process.env.TEST_FILE;
-          const method = process.env.TEST_NAME;
+          if [ ! -f "providers/reanime.js" ]; then
+            echo "ERROR: providers/reanime.js does not exist!"
+            exit 1
+          fi
 
-          const TMDB_API_KEY =
-            "439c478a771f35c05022f9feabcca01c";
+          echo "Provider file found."
+          echo ""
+
+      - name: Check JavaScript syntax
+        run: |
+          echo "Checking syntax..."
+
+          node --check providers/reanime.js
+
+          echo ""
+          echo "Syntax check PASSED."
+
+      - name: Run ReAnime provider
+        run: |
+          cat > test-reanime.mjs <<'EOF'
+          import { createRequire } from "module";
+
+          const require = createRequire(import.meta.url);
+          const provider = require("./providers/reanime.js");
 
           console.log("");
           console.log("========================================");
-          console.log("LOADING PROVIDER");
-          console.log("Method :", method);
-          console.log("File   :", file);
+          console.log("LOADING REANIME PROVIDER");
           console.log("========================================");
 
-          const provider = require("./" + file);
-
           if (!provider || typeof provider.getStreams !== "function") {
-            throw new Error("Provider does not export getStreams()");
-          }
-
-          console.log("[TEST] getStreams() found");
-
-          // --------------------------------------------------
-          // Search TMDB instead of hard-coding TMDB IDs.
-          // This prevents another incorrect-ID test.
-          // --------------------------------------------------
-
-          async function searchTMDB(query, type) {
-            const url =
-              `https://api.themoviedb.org/3/search/${type}` +
-              `?api_key=${TMDB_API_KEY}` +
-              `&query=${encodeURIComponent(query)}`;
-
-            const res = await fetch(url);
-
-            console.log(
-              `[TMDB SEARCH] HTTP ${res.status} ${url}`
-            );
-
-            if (!res.ok) {
-              throw new Error(
-                `TMDB search failed: HTTP ${res.status}`
-              );
-            }
-
-            const json = await res.json();
-
-            if (!json.results || !json.results.length) {
-              throw new Error(
-                `No TMDB result for ${query}`
-              );
-            }
-
-            return json.results[0];
-          }
-
-          async function getTMDB(id, type) {
-            const url =
-              `https://api.themoviedb.org/3/${type}/${id}` +
-              `?api_key=${TMDB_API_KEY}` +
-              `&append_to_response=external_ids`;
-
-            const res = await fetch(url);
-
-            console.log(
-              `[TMDB] HTTP ${res.status} ${url}`
-            );
-
-            if (!res.ok) {
-              throw new Error(
-                `TMDB lookup failed: HTTP ${res.status}`
-              );
-            }
-
-            return res.json();
-          }
-
-          async function getAniList(id) {
-            const query = `
-              query ($id: Int) {
-                Media(id: $id) {
-                  id
-                  title {
-                    romaji
-                    english
-                    native
-                  }
-                  type
-                  format
-                }
-              }
-            `;
-
-            const res = await fetch(
-              "https://graphql.anilist.co",
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  query,
-                  variables: {
-                    id: Number(id)
-                  }
-                })
-              }
-            );
-
-            if (!res.ok) {
-              return null;
-            }
-
-            const json = await res.json();
-
-            return json?.data?.Media || null;
-          }
-
-          // --------------------------------------------------
-          // We deliberately search by title so the workflow
-          // itself determines the correct TMDB ID.
-          // --------------------------------------------------
-
-          const cases = [
-            {
-              label: "Jujutsu Kaisen 0",
-              search: "Jujutsu Kaisen 0",
-              type: "movie"
-            },
-            {
-              label: "DanMachi S1 OVA",
-              search: "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
-              type: "tv",
-              season: 1,
-              episode: 14
-            },
-            {
-              label: "Jujutsu Kaisen S2E1",
-              search: "Jujutsu Kaisen",
-              type: "tv",
-              season: 2,
-              episode: 1
-            }
-          ];
-
-          async function runCase(test) {
-            console.log("");
-            console.log("");
-            console.log(
-              "########################################"
-            );
-            console.log(
-              `CASE: ${test.label}`
-            );
-            console.log(
-              "########################################"
-            );
-
-            // ------------------------------------------------
-            // Find TMDB entry
-            // ------------------------------------------------
-
-            const searchResult =
-              await searchTMDB(
-                test.search,
-                test.type
-              );
-
-            const tmdbId =
-              String(searchResult.id);
-
-            console.log("");
-            console.log("TMDB SEARCH RESULT");
-            console.log(
-              "  ID   :",
-              tmdbId
-            );
-            console.log(
-              "  Name :",
-              searchResult.name ||
-              searchResult.title
-            );
-
-            // ------------------------------------------------
-            // Full TMDB details + IMDb
-            // ------------------------------------------------
-
-            const tmdb =
-              await getTMDB(
-                tmdbId,
-                test.type
-              );
-
-            const imdb =
-              tmdb?.external_ids?.imdb_id ||
-              "NONE";
-
-            console.log("");
-            console.log("TMDB DETAILS");
-            console.log(
-              "  TMDB ID :",
-              tmdb.id
-            );
-            console.log(
-              "  Name    :",
-              tmdb.name ||
-              tmdb.title ||
-              "UNKNOWN"
-            );
-            console.log(
-              "  Original:",
-              tmdb.original_name ||
-              tmdb.original_title ||
-              "UNKNOWN"
-            );
-            console.log(
-              "  IMDb    :",
-              imdb
-            );
-
-            if (test.season !== undefined) {
-              console.log(
-                "  Season  :",
-                test.season
-              );
-              console.log(
-                "  Episode :",
-                test.episode
-              );
-            }
-
-            // ------------------------------------------------
-            // Call mapping provider.
-            //
-            // IMPORTANT:
-            // The provider may continue into ReAnime and
-            // eventually return [], so we also inspect logs.
-            // ------------------------------------------------
-
-            console.log("");
-            console.log("MAPPING TEST");
-
-            try {
-              let result;
-
-              if (test.type === "movie") {
-                result =
-                  await provider.getStreams(
-                    tmdbId,
-                    "movie"
-                  );
-              } else {
-                result =
-                  await provider.getStreams(
-                    tmdbId,
-                    "tv",
-                    test.season,
-                    test.episode
-                  );
-              }
-
-              console.log("");
-              console.log(
-                `[${method}] FINAL PROVIDER RESULT`
-              );
-
-              console.log(
-                JSON.stringify(
-                  result,
-                  null,
-                  2
-                )
-              );
-
-              console.log("");
-              console.log(
-                `[${method}] Provider returned ${Array.isArray(result) ? result.length : 0} streams`
-              );
-
-            } catch (error) {
-              console.error("");
-              console.error(
-                `[${method}] PROVIDER ERROR`
-              );
-              console.error(
-                error?.stack || error
-              );
-            }
-
-            console.log("");
-            console.log(
-              "########################################"
-            );
-            console.log(
-              `END CASE: ${test.label}`
-            );
-            console.log(
-              "########################################"
-            );
-          }
-
-          (async () => {
-            for (const test of cases) {
-              await runCase(test);
-            }
-
-            console.log("");
-            console.log(
-              "========================================"
-            );
-            console.log(
-              `ALL ${method} TESTS COMPLETE`
-            );
-            console.log(
-              "========================================"
-            );
-          })().catch(error => {
-            console.error("");
-            console.error(
-              "FATAL TEST ERROR"
-            );
-            console.error(
-              error?.stack || error
-            );
+            console.error("ERROR: getStreams() was not exported!");
             process.exit(1);
-          });
-          NODE
+          }
+
+          console.log("Provider loaded successfully.");
+          console.log("getStreams : OK");
+          console.log(
+            "onSettings :",
+            typeof provider.onSettings === "function" ? "OK" : "MISSING"
+          );
+
+          console.log("");
+          console.log("========================================");
+          console.log("TEST CASE");
+          console.log("========================================");
+          console.log("TMDB      : 1429");
+          console.log("Type      : tv");
+          console.log("Season    : 1");
+          console.log("Episode   : 1");
+          console.log("========================================");
+          console.log("");
+
+          try {
+            const streams = await provider.getStreams(
+              1429,
+              "tv",
+              1,
+              1
+            );
+
+            console.log("");
+            console.log("========================================");
+            console.log("FINAL RESULT");
+            console.log("========================================");
+
+            if (!Array.isArray(streams)) {
+              console.error("ERROR: Provider did not return an array.");
+              process.exit(1);
+            }
+
+            console.log("Stream count:", streams.length);
+
+            if (streams.length === 0) {
+              console.log("NO STREAMS RETURNED");
+              console.log("");
+              console.log("The provider executed successfully,");
+              console.log("but no playable streams were produced.");
+              process.exit(0);
+            }
+
+            for (let i = 0; i < streams.length; i++) {
+              const s = streams[i];
+
+              console.log("");
+              console.log(`--- STREAM ${i + 1} ---`);
+              console.log("Name     :", s.name);
+              console.log("Title    :", s.title);
+              console.log("Quality  :", s.quality);
+              console.log("Type     :", s.type);
+              console.log("Provider :", s.provider);
+              console.log("Size     :", s.size || "N/A");
+              console.log("URL      :", s.url ? "PRESENT" : "MISSING");
+            }
+
+            console.log("");
+            console.log("========================================");
+            console.log("PROVIDER TEST COMPLETE");
+            console.log("========================================");
+
+          } catch (error) {
+            console.error("");
+            console.error("========================================");
+            console.error("PROVIDER TEST FAILED");
+            console.error("========================================");
+            console.error(error?.stack || error);
+            process.exit(1);
+          }
+          EOF
+
+          node test-reanime.mjs
