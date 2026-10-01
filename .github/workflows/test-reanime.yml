@@ -1,0 +1,86 @@
+name: Test ReAnime
+
+on:
+  workflow_dispatch:
+    inputs:
+      tmdb_id:
+        description: "TMDB ID"
+        required: true
+        default: "5114"
+      type:
+        description: "movie or tv"
+        required: true
+        default: "tv"
+      season:
+        description: "Season"
+        required: true
+        default: "1"
+      episode:
+        description: "Episode"
+        required: true
+        default: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install crypto-js
+
+      - name: Run ReAnime
+        run: |
+          cat > test.js <<'EOF'
+          const {getStreams}=require("./providers/reanime.js");
+
+          const tmdbId=process.env.TMDB_ID;
+          const type=process.env.TYPE;
+          const season=Number(process.env.SEASON);
+          const episode=Number(process.env.EPISODE);
+
+          console.log("========================================");
+          console.log("REANIME TEST");
+          console.log("TMDB:",tmdbId);
+          console.log("Type:",type);
+          console.log("Season:",season);
+          console.log("Episode:",episode);
+          console.log("========================================");
+
+          (async()=>{
+            try{
+              const start=Date.now();
+              const streams=await getStreams(
+                tmdbId,
+                type,
+                season,
+                episode
+              );
+
+              console.log("========================================");
+              console.log("RESULT");
+              console.log("Time:",`${Date.now()-start}ms`);
+              console.log("Streams:",streams.length);
+              console.dir(streams,{depth:null});
+              console.log("========================================");
+            }catch(e){
+              console.error("TEST FAILED");
+              console.error(e?.stack||e);
+              process.exitCode=1;
+            }
+          })();
+          EOF
+
+          node test.js
+        env:
+          TMDB_ID: ${{ inputs.tmdb_id }}
+          TYPE: ${{ inputs.type }}
+          SEASON: ${{ inputs.season }}
+          EPISODE: ${{ inputs.episode }}
