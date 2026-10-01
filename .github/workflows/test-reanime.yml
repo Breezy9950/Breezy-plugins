@@ -1,4 +1,4 @@
-name: Test ReAnime Providers
+name: Test ReAnime Mapping Providers
 
 on:
   workflow_dispatch:
@@ -10,19 +10,24 @@ jobs:
 
     strategy:
       fail-fast: false
+
       matrix:
         include:
           - name: AniZip
             branch: Breezy9950-patch-1
+            file: providers/AniZip.js
 
           - name: Fribb
             branch: Breezy9950-patch-2
+            file: providers/Fribb.js
 
           - name: AniMap
             branch: Breezy9950-patch-3
+            file: providers/AniMap.js
 
           - name: IDMapper
             branch: Breezy9950-patch-4
+            file: providers/IDMapper.js
 
     steps:
       - name: Checkout ${{ matrix.name }}
@@ -38,13 +43,68 @@ jobs:
       - name: Install crypto-js
         run: npm install crypto-js
 
-      - name: Test ReAnime
+      - name: Verify test file
         env:
           TEST_NAME: ${{ matrix.name }}
           TEST_BRANCH: ${{ matrix.branch }}
+          TEST_FILE: ${{ matrix.file }}
+        run: |
+          echo "========================================"
+          echo "PROVIDER TEST"
+          echo "========================================"
+          echo "Method : $TEST_NAME"
+          echo "Branch : $TEST_BRANCH"
+          echo "File   : $TEST_FILE"
+          echo "========================================"
+
+          if [ ! -f "$TEST_FILE" ]; then
+            echo "ERROR: Test file does not exist!"
+            exit 1
+          fi
+
+          echo ""
+          echo "File found:"
+          ls -lh "$TEST_FILE"
+
+          echo ""
+          echo "Checking mapping provider references:"
+          grep -n -E "AniZip|AniMap|Fribb|IDMapper|animap|ani.zip|idmapper" "$TEST_FILE" || true
+
+      - name: Test ${{ matrix.name }}
+        env:
+          TEST_NAME: ${{ matrix.name }}
+          TEST_BRANCH: ${{ matrix.branch }}
+          TEST_FILE: ${{ matrix.file }}
         run: |
           node <<'EOF'
-          const { getStreams } = require("./providers/reanime.js");
+          const path = require("path");
+
+          const file = path.resolve(
+            process.env.TEST_FILE
+          );
+
+          console.log("");
+          console.log("========================================");
+          console.log("REANIME PROVIDER TEST");
+          console.log("========================================");
+          console.log("Method :", process.env.TEST_NAME);
+          console.log("Branch :", process.env.TEST_BRANCH);
+          console.log("File   :", process.env.TEST_FILE);
+          console.log("========================================");
+          console.log("");
+
+          console.log("Loading:", file);
+
+          const provider = require(file);
+
+          if (
+            !provider ||
+            typeof provider.getStreams !== "function"
+          ) {
+            throw new Error(
+              "Provider does not export getStreams()"
+            );
+          }
 
           globalThis.SCRAPER_SETTINGS = {
             reanime_sub: true,
@@ -57,26 +117,21 @@ jobs:
           const EPISODE = 1;
 
           console.log("");
-          console.log("========================================");
-          console.log("REANIME PROVIDER TEST");
-          console.log("========================================");
-          console.log("Method :", process.env.TEST_NAME);
-          console.log("Branch :", process.env.TEST_BRANCH);
           console.log("TMDB   :", TMDB_ID);
           console.log("Type   :", TYPE);
           console.log("Season :", SEASON);
           console.log("Episode:", EPISODE);
-          console.log("========================================");
           console.log("");
 
           (async () => {
             try {
-              const result = await getStreams(
-                TMDB_ID,
-                TYPE,
-                SEASON,
-                EPISODE
-              );
+              const result =
+                await provider.getStreams(
+                  TMDB_ID,
+                  TYPE,
+                  SEASON,
+                  EPISODE
+                );
 
               console.log("");
               console.log("========================================");
@@ -88,16 +143,33 @@ jobs:
               );
 
               console.log("");
-              console.log("STREAM COUNT:", Array.isArray(result) ? result.length : "unknown");
-              console.log("STATUS: SUCCESS");
-              console.log("========================================");
+              console.log(
+                "STREAM COUNT:",
+                Array.isArray(result)
+                  ? result.length
+                  : "unknown"
+              );
+
+              console.log(
+                "STATUS: SUCCESS"
+              );
+
+              console.log(
+                "========================================"
+              );
             } catch (error) {
               console.log("");
               console.log("========================================");
               console.log("TEST FAILED");
               console.log("========================================");
-              console.error(error);
-              console.log("========================================");
+
+              console.error(
+                error?.stack || error
+              );
+
+              console.log(
+                "========================================"
+              );
 
               process.exitCode = 1;
             }
