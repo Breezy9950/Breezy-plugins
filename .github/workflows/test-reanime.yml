@@ -24,12 +24,8 @@ jobs:
             branch: Breezy9950-patch-3
             file: providers/AniMap
 
-          - name: IDMapper
-            branch: Breezy9950-patch-4
-            file: providers/IDMapper
-
     steps:
-      - name: Checkout test branch
+      - name: Checkout provider branch
         uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
@@ -37,7 +33,7 @@ jobs:
       - name: Show test information
         run: |
           echo "========================================"
-          echo "PROVIDER TEST"
+          echo "MAPPING PROVIDER TEST"
           echo "Method : ${{ matrix.name }}"
           echo "Branch : ${{ matrix.branch }}"
           echo "File   : ${{ matrix.file }}"
@@ -46,7 +42,7 @@ jobs:
       - name: Check provider file
         run: |
           if [ ! -f "${{ matrix.file }}" ]; then
-            echo "ERROR: Test file does not exist!"
+            echo "ERROR: Provider file does not exist!"
             echo
             echo "Contents of providers/:"
             find providers -maxdepth 1 -type f -print
@@ -59,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: npm install crypto-js
 
-      - name: Run provider
+      - name: Run mapping tests
         env:
           TEST_FILE: ${{ matrix.file }}
           TEST_NAME: ${{ matrix.name }}
@@ -69,13 +65,13 @@ jobs:
           const fs = require("fs");
 
           const file = process.env.TEST_FILE;
-          const name = process.env.TEST_NAME;
+          const method = process.env.TEST_NAME;
           const branch = process.env.TEST_BRANCH;
 
           console.log("");
           console.log("========================================");
           console.log("LOADING PROVIDER");
-          console.log("Method :", name);
+          console.log("Method :", method);
           console.log("Branch :", branch);
           console.log("File   :", file);
           console.log("========================================");
@@ -93,33 +89,309 @@ jobs:
           }
 
           console.log("[TEST] getStreams() found");
-          console.log("[TEST] Calling TMDB 1429 S1E1...");
-          console.log("");
 
-          provider
-            .getStreams("1429", "tv", 1, 1)
-            .then(result => {
+          const TMDB_API_KEY =
+            "439c478a771f35c05022f9feabcca01c";
+
+          const cases = [
+            {
+              name: "Jujutsu Kaisen 0",
+              tmdbId: "820232",
+              type: "movie",
+              season: null,
+              episode: null
+            },
+            {
+              name: "DanMachi S1 OVA",
+              tmdbId: "62741",
+              type: "tv",
+              season: 1,
+              episode: 14
+            },
+            {
+              name: "Jujutsu Kaisen S2E1",
+              tmdbId: "95479",
+              type: "tv",
+              season: 2,
+              episode: 1
+            }
+          ];
+
+          async function tmdbInfo(id, type) {
+            const url =
+              `https://api.themoviedb.org/3/${type}/${id}` +
+              `?api_key=${TMDB_API_KEY}` +
+              `&append_to_response=external_ids`;
+
+            const res = await fetch(url);
+
+            console.log(
+              `[TMDB] HTTP ${res.status} ${url}`
+            );
+
+            if (!res.ok) {
+              throw new Error(
+                `TMDB request failed: ${res.status}`
+              );
+            }
+
+            return res.json();
+          }
+
+          async function aniListInfo(id) {
+            const query = `
+              query ($id: Int) {
+                Media(id: $id) {
+                  id
+                  title {
+                    romaji
+                    english
+                    native
+                  }
+                  type
+                  format
+                }
+              }
+            `;
+
+            const res = await fetch(
+              "https://graphql.anilist.co",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  query,
+                  variables: {
+                    id: Number(id)
+                  }
+                })
+              }
+            );
+
+            console.log(
+              `[AniList] HTTP ${res.status} for ${id}`
+            );
+
+            if (!res.ok) {
+              return null;
+            }
+
+            const json = await res.json();
+
+            return json?.data?.Media || null;
+          }
+
+          async function runCase(test) {
+            console.log("");
+            console.log("");
+            console.log(
+              "########################################"
+            );
+            console.log(
+              `CASE: ${test.name}`
+            );
+            console.log(
+              "########################################"
+            );
+
+            console.log("");
+            console.log("INPUT");
+            console.log("  Type    :", test.type);
+            console.log("  TMDB ID :", test.tmdbId);
+
+            if (test.season !== null) {
+              console.log(
+                "  Season  :",
+                test.season
+              );
+
+              console.log(
+                "  Episode :",
+                test.episode
+              );
+            }
+
+            console.log("");
+            console.log("TMDB LOOKUP");
+
+            const tmdb = await tmdbInfo(
+              test.tmdbId,
+              test.type
+            );
+
+            const imdb =
+              tmdb?.external_ids?.imdb_id || "NONE";
+
+            console.log(
+              "  TMDB ID :",
+              tmdb?.id ?? test.tmdbId
+            );
+
+            console.log(
+              "  Name    :",
+              tmdb?.name ||
+              tmdb?.title ||
+              "UNKNOWN"
+            );
+
+            console.log(
+              "  Original:",
+              tmdb?.original_name ||
+              tmdb?.original_title ||
+              "UNKNOWN"
+            );
+
+            console.log(
+              "  IMDb    :",
+              imdb
+            );
+
+            console.log("");
+            console.log("MAPPING");
+
+            try {
+              let result;
+
+              if (test.type === "movie") {
+                result = await provider.getStreams(
+                  test.tmdbId,
+                  "movie"
+                );
+              } else {
+                result = await provider.getStreams(
+                  test.tmdbId,
+                  "tv",
+                  test.season,
+                  test.episode
+                );
+              }
+
               console.log("");
-              console.log("========================================");
-              console.log("RESULT");
-              console.log("========================================");
+              console.log(
+                `[${method}] Provider returned:`
+              );
 
               console.log(
                 JSON.stringify(result, null, 2)
               );
 
-              console.log("");
-              console.log("========================================");
-              console.log("TEST COMPLETE");
-              console.log("========================================");
-            })
-            .catch(error => {
+              /*
+               * Try to discover AniList IDs from the
+               * returned object without assuming one
+               * particular provider output structure.
+               */
+              const jsonText =
+                JSON.stringify(result || {});
+
+              const ids = [
+                ...jsonText.matchAll(
+                  /(?:anilist(?:_id|Id)?|aniListId)[^0-9]{0,20}([0-9]{3,})/gi
+                )
+              ].map(m => m[1]);
+
+              const uniqueIds =
+                [...new Set(ids)];
+
+              if (uniqueIds.length === 0) {
+                console.log("");
+                console.log(
+                  `[${method}] No AniList ID found in provider result.`
+                );
+              } else {
+                console.log("");
+
+                for (const id of uniqueIds) {
+                  const media =
+                    await aniListInfo(id);
+
+                  console.log(
+                    `[${method}] AniList ID: ${id}`
+                  );
+
+                  if (media) {
+                    console.log(
+                      `[${method}] AniList type: ${media.type}`
+                    );
+
+                    console.log(
+                      `[${method}] AniList format: ${media.format}`
+                    );
+
+                    console.log(
+                      `[${method}] AniList title (English):`,
+                      media.title?.english || "NONE"
+                    );
+
+                    console.log(
+                      `[${method}] AniList title (Romaji):`,
+                      media.title?.romaji || "NONE"
+                    );
+
+                    console.log(
+                      `[${method}] AniList title (Native):`,
+                      media.title?.native || "NONE"
+                    );
+                  } else {
+                    console.log(
+                      `[${method}] AniList lookup returned no Media.`
+                    );
+                  }
+                }
+              }
+
+            } catch (error) {
               console.error("");
-              console.error("========================================");
-              console.error("PROVIDER ERROR");
-              console.error("========================================");
-              console.error(error);
-              console.error(error?.stack || "");
-              process.exit(1);
-            });
+              console.error(
+                `[${method}] MAPPING ERROR`
+              );
+              console.error(
+                error?.stack || error
+              );
+            }
+
+            console.log("");
+            console.log(
+              "########################################"
+            );
+            console.log(
+              `END CASE: ${test.name}`
+            );
+            console.log(
+              "########################################"
+            );
+          }
+
+          (async () => {
+            for (const test of cases) {
+              await runCase(test);
+            }
+
+            console.log("");
+            console.log(
+              "========================================"
+            );
+            console.log(
+              `ALL ${method} TESTS COMPLETE`
+            );
+            console.log(
+              "========================================"
+            );
+          })().catch(error => {
+            console.error("");
+            console.error(
+              "========================================"
+            );
+            console.error(
+              "FATAL TEST ERROR"
+            );
+            console.error(
+              "========================================"
+            );
+            console.error(
+              error?.stack || error
+            );
+            process.exit(1);
+          });
           NODE
