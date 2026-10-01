@@ -1,4 +1,4 @@
-name: Test ReAnime Mapping Providers
+name: Test ReAnime Mapping Methods
 
 on:
   workflow_dispatch:
@@ -10,132 +10,98 @@ jobs:
 
     strategy:
       fail-fast: false
-
       matrix:
         include:
           - name: AniZip
             branch: Breezy9950-patch-1
-            file: providers/AniZip.js
+            file: providers/AniZip
 
           - name: Fribb
             branch: Breezy9950-patch-2
-            file: providers/Fribb.js
+            file: providers/Fribb Anime Lists
 
           - name: AniMap
             branch: Breezy9950-patch-3
-            file: providers/AniMap.js
+            file: providers/AniMap
 
           - name: IDMapper
             branch: Breezy9950-patch-4
-            file: providers/IDMapper.js
+            file: providers/IDMapper
 
     steps:
-      - name: Checkout ${{ matrix.name }}
-        uses: actions/checkout@v6
+      - name: Checkout test branch
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: '20'
-
-      - name: Install crypto-js
-        run: npm install crypto-js
-
-      - name: Verify test file
-        env:
-          TEST_NAME: ${{ matrix.name }}
-          TEST_BRANCH: ${{ matrix.branch }}
-          TEST_FILE: ${{ matrix.file }}
+      - name: Show test information
         run: |
           echo "========================================"
           echo "PROVIDER TEST"
-          echo "========================================"
-          echo "Method : $TEST_NAME"
-          echo "Branch : $TEST_BRANCH"
-          echo "File   : $TEST_FILE"
+          echo "Method : ${{ matrix.name }}"
+          echo "Branch : ${{ matrix.branch }}"
+          echo "File   : ${{ matrix.file }}"
           echo "========================================"
 
-          if [ ! -f "$TEST_FILE" ]; then
+      - name: Check provider file
+        run: |
+          if [ ! -f "${{ matrix.file }}" ]; then
             echo "ERROR: Test file does not exist!"
+            echo
+            echo "Contents of providers/:"
+            find providers -maxdepth 1 -type f -print
             exit 1
           fi
 
-          echo ""
-          echo "File found:"
-          ls -lh "$TEST_FILE"
+          echo "Provider file found:"
+          ls -lh "${{ matrix.file }}"
 
-          echo ""
-          echo "Checking mapping provider references:"
-          grep -n -E "AniZip|AniMap|Fribb|IDMapper|animap|ani.zip|idmapper" "$TEST_FILE" || true
+      - name: Install dependencies
+        run: npm install crypto-js
 
-      - name: Test ${{ matrix.name }}
+      - name: Run provider
         env:
+          TEST_FILE: ${{ matrix.file }}
           TEST_NAME: ${{ matrix.name }}
           TEST_BRANCH: ${{ matrix.branch }}
-          TEST_FILE: ${{ matrix.file }}
         run: |
-          node <<'EOF'
-          const path = require("path");
+          node <<'NODE'
+          const fs = require("fs");
 
-          const file = path.resolve(
-            process.env.TEST_FILE
-          );
+          const file = process.env.TEST_FILE;
+          const name = process.env.TEST_NAME;
+          const branch = process.env.TEST_BRANCH;
 
           console.log("");
           console.log("========================================");
-          console.log("REANIME PROVIDER TEST");
+          console.log("LOADING PROVIDER");
+          console.log("Method :", name);
+          console.log("Branch :", branch);
+          console.log("File   :", file);
           console.log("========================================");
-          console.log("Method :", process.env.TEST_NAME);
-          console.log("Branch :", process.env.TEST_BRANCH);
-          console.log("File   :", process.env.TEST_FILE);
-          console.log("========================================");
-          console.log("");
 
-          console.log("Loading:", file);
+          if (!fs.existsSync(file)) {
+            throw new Error("Provider file does not exist: " + file);
+          }
 
-          const provider = require(file);
+          const provider = require("./" + file);
 
-          if (
-            !provider ||
-            typeof provider.getStreams !== "function"
-          ) {
+          if (!provider || typeof provider.getStreams !== "function") {
             throw new Error(
               "Provider does not export getStreams()"
             );
           }
 
-          globalThis.SCRAPER_SETTINGS = {
-            reanime_sub: true,
-            reanime_dub: true
-          };
-
-          const TMDB_ID = "1429";
-          const TYPE = "tv";
-          const SEASON = 1;
-          const EPISODE = 1;
-
-          console.log("");
-          console.log("TMDB   :", TMDB_ID);
-          console.log("Type   :", TYPE);
-          console.log("Season :", SEASON);
-          console.log("Episode:", EPISODE);
+          console.log("[TEST] getStreams() found");
+          console.log("[TEST] Calling TMDB 1429 S1E1...");
           console.log("");
 
-          (async () => {
-            try {
-              const result =
-                await provider.getStreams(
-                  TMDB_ID,
-                  TYPE,
-                  SEASON,
-                  EPISODE
-                );
-
+          provider
+            .getStreams("1429", "tv", 1, 1)
+            .then(result => {
               console.log("");
               console.log("========================================");
-              console.log("FINAL RESULT");
+              console.log("RESULT");
               console.log("========================================");
 
               console.log(
@@ -143,35 +109,17 @@ jobs:
               );
 
               console.log("");
-              console.log(
-                "STREAM COUNT:",
-                Array.isArray(result)
-                  ? result.length
-                  : "unknown"
-              );
-
-              console.log(
-                "STATUS: SUCCESS"
-              );
-
-              console.log(
-                "========================================"
-              );
-            } catch (error) {
-              console.log("");
               console.log("========================================");
-              console.log("TEST FAILED");
+              console.log("TEST COMPLETE");
               console.log("========================================");
-
-              console.error(
-                error?.stack || error
-              );
-
-              console.log(
-                "========================================"
-              );
-
-              process.exitCode = 1;
-            }
-          })();
-          EOF
+            })
+            .catch(error => {
+              console.error("");
+              console.error("========================================");
+              console.error("PROVIDER ERROR");
+              console.error("========================================");
+              console.error(error);
+              console.error(error?.stack || "");
+              process.exit(1);
+            });
+          NODE
