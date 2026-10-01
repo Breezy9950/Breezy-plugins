@@ -1,174 +1,105 @@
-name: Test ReAnime
+name: Test ReAnime Providers
 
 on:
   workflow_dispatch:
 
 jobs:
   test:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AniZip
+            branch: Breezy9950-patch-1
+
+          - name: Fribb
+            branch: Breezy9950-patch-2
+
+          - name: AniMap
+            branch: Breezy9950-patch-3
+
+          - name: IDMapper
+            branch: Breezy9950-patch-4
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout ${{ matrix.name }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.branch }}
 
-      - name: Test TMDB to AniList
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: Install crypto-js
+        run: npm install crypto-js
+
+      - name: Test ReAnime
+        env:
+          TEST_NAME: ${{ matrix.name }}
+          TEST_BRANCH: ${{ matrix.branch }}
         run: |
-          cat > test.js <<'EOF'
-          const TMDB_ID = "5114";
-          const TMDB_API_KEY =
-            "439c478a771f35c05022f9feabcca01c";
+          node <<'EOF'
+          const { getStreams } = require("./providers/reanime.js");
 
-          const ANILIST_URL =
-            "https://graphql.anilist.co";
+          globalThis.SCRAPER_SETTINGS = {
+            reanime_sub: true,
+            reanime_dub: true
+          };
 
-          console.log("========================================");
-          console.log("TMDB → ANILIST TEST");
-          console.log("========================================");
-
-          // ========================================
-          // TMDB
-          // ========================================
-
-          const tmdbResponse = await fetch(
-            `https://api.themoviedb.org/3/tv/${TMDB_ID}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
-          );
-
-          console.log(
-            "TMDB HTTP:",
-            tmdbResponse.status
-          );
-
-          const tmdb = await tmdbResponse.json();
+          const TMDB_ID = "1429";
+          const TYPE = "tv";
+          const SEASON = 1;
+          const EPISODE = 1;
 
           console.log("");
-          console.log("TMDB:");
-          console.log("ID:", TMDB_ID);
-          console.log("Name:", tmdb.name);
-          console.log(
-            "Original name:",
-            tmdb.original_name
-          );
-          console.log(
-            "IMDb:",
-            tmdb.external_ids?.imdb_id || "none"
-          );
+          console.log("========================================");
+          console.log("REANIME PROVIDER TEST");
+          console.log("========================================");
+          console.log("Method :", process.env.TEST_NAME);
+          console.log("Branch :", process.env.TEST_BRANCH);
+          console.log("TMDB   :", TMDB_ID);
+          console.log("Type   :", TYPE);
+          console.log("Season :", SEASON);
+          console.log("Episode:", EPISODE);
+          console.log("========================================");
+          console.log("");
 
-          // ========================================
-          // ANILIST SEARCH
-          // ========================================
+          (async () => {
+            try {
+              const result = await getStreams(
+                TMDB_ID,
+                TYPE,
+                SEASON,
+                EPISODE
+              );
 
-          const title =
-            tmdb.name ||
-            tmdb.original_name;
+              console.log("");
+              console.log("========================================");
+              console.log("FINAL RESULT");
+              console.log("========================================");
 
-          const query = `
-            query ($search: String) {
-              Page(page: 1, perPage: 10) {
-                media(
-                  search: $search
-                  type: ANIME
-                ) {
-                  id
-                  idMal
-                  title {
-                    romaji
-                    english
-                    native
-                  }
-                  season
-                  seasonYear
-                  episodes
-                  format
-                }
-              }
+              console.log(
+                JSON.stringify(result, null, 2)
+              );
+
+              console.log("");
+              console.log("STREAM COUNT:", Array.isArray(result) ? result.length : "unknown");
+              console.log("STATUS: SUCCESS");
+              console.log("========================================");
+            } catch (error) {
+              console.log("");
+              console.log("========================================");
+              console.log("TEST FAILED");
+              console.log("========================================");
+              console.error(error);
+              console.log("========================================");
+
+              process.exitCode = 1;
             }
-          `;
-
-          const aniResponse = await fetch(
-            ANILIST_URL,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Accept: "application/json"
-              },
-              body: JSON.stringify({
-                query,
-                variables: {
-                  search: title
-                }
-              })
-            }
-          );
-
-          console.log("");
-          console.log(
-            "AniList HTTP:",
-            aniResponse.status
-          );
-
-          const aniData =
-            await aniResponse.json();
-
-          if (aniData.errors) {
-            console.log(
-              "AniList errors:",
-              JSON.stringify(
-                aniData.errors,
-                null,
-                2
-              )
-            );
-          }
-
-          const results =
-            aniData.data?.Page?.media || [];
-
-          console.log("");
-          console.log(
-            "AniList results:",
-            results.length
-          );
-
-          for (const anime of results) {
-            console.log("");
-            console.log("────────────────────");
-            console.log("AniList ID:", anime.id);
-            console.log("MAL ID:", anime.idMal);
-            console.log(
-              "Romaji:",
-              anime.title?.romaji
-            );
-            console.log(
-              "English:",
-              anime.title?.english
-            );
-            console.log(
-              "Native:",
-              anime.title?.native
-            );
-            console.log(
-              "Season:",
-              anime.season
-            );
-            console.log(
-              "Year:",
-              anime.seasonYear
-            );
-            console.log(
-              "Episodes:",
-              anime.episodes
-            );
-            console.log(
-              "Format:",
-              anime.format
-            );
-          }
-
-          console.log("");
-          console.log("========================================");
-          console.log("DONE");
-          console.log("========================================");
+          })();
           EOF
-
-          node test.js
