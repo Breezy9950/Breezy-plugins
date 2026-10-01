@@ -11,213 +11,157 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect AniBridge Reverse Mapping
+      - name: Test TMDB to AniList
         run: |
-          cat > inspect.js <<'EOF'
-          const url =
-            "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
+          cat > test.js <<'EOF'
+          const TMDB_ID = "5114";
+          const TMDB_API_KEY =
+            "439c478a771f35c05022f9feabcca01c";
+
+          const ANILIST_URL =
+            "https://graphql.anilist.co";
 
           console.log("========================================");
-          console.log("ANIBRIDGE REVERSE MAPPING DIAGNOSTIC");
+          console.log("TMDB → ANILIST TEST");
           console.log("========================================");
 
-          const response = await fetch(url, {
-            headers: {
-              Accept: "application/json",
-              "User-Agent": "Reanime-Nuvio-Test/1.0"
-            }
-          });
-
-          console.log("HTTP:", response.status);
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const raw = await response.json();
-
           // ========================================
-          // SEARCH TARGETS
+          // TMDB
           // ========================================
 
-          const tmdbId = "5114";
-          const season = 1;
+          const tmdbResponse = await fetch(
+            `https://api.themoviedb.org/3/tv/${TMDB_ID}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
+          );
 
-          const target =
-            `tmdb_show:${tmdbId}:s${season}`;
+          console.log(
+            "TMDB HTTP:",
+            tmdbResponse.status
+          );
+
+          const tmdb = await tmdbResponse.json();
 
           console.log("");
-          console.log("========================================");
-          console.log("SEARCH TARGET");
-          console.log("========================================");
+          console.log("TMDB:");
+          console.log("ID:", TMDB_ID);
+          console.log("Name:", tmdb.name);
+          console.log(
+            "Original name:",
+            tmdb.original_name
+          );
+          console.log(
+            "IMDb:",
+            tmdb.external_ids?.imdb_id || "none"
+          );
 
-          console.log("Target:", target);
+          // ========================================
+          // ANILIST SEARCH
+          // ========================================
 
-          const matches = [];
+          const title =
+            tmdb.name ||
+            tmdb.original_name;
 
-          for (const [source, targets] of Object.entries(raw)) {
-            if (!targets || typeof targets !== "object") {
-              continue;
-            }
-
-            for (const [targetKey, mapping] of Object.entries(targets)) {
-              if (targetKey === target) {
-                matches.push({
-                  source,
-                  target: targetKey,
-                  mapping
-                });
+          const query = `
+            query ($search: String) {
+              Page(page: 1, perPage: 10) {
+                media(
+                  search: $search
+                  type: ANIME
+                ) {
+                  id
+                  idMal
+                  title {
+                    romaji
+                    english
+                    native
+                  }
+                  season
+                  seasonYear
+                  episodes
+                  format
+                }
               }
             }
-          }
+          `;
+
+          const aniResponse = await fetch(
+            ANILIST_URL,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Accept: "application/json"
+              },
+              body: JSON.stringify({
+                query,
+                variables: {
+                  search: title
+                }
+              })
+            }
+          );
 
           console.log("");
-          console.log("Matches:", matches.length);
+          console.log(
+            "AniList HTTP:",
+            aniResponse.status
+          );
 
-          for (const match of matches.slice(0, 50)) {
-            console.log("");
-            console.log("SOURCE:", match.source);
-            console.log("TARGET:", match.target);
+          const aniData =
+            await aniResponse.json();
+
+          if (aniData.errors) {
             console.log(
-              "MAPPING:",
-              JSON.stringify(match.mapping, null, 2)
+              "AniList errors:",
+              JSON.stringify(
+                aniData.errors,
+                null,
+                2
+              )
             );
           }
 
-          // ========================================
-          // SEARCH ALL SEASONS FOR TMDB 5114
-          // ========================================
+          const results =
+            aniData.data?.Page?.media || [];
 
           console.log("");
-          console.log("========================================");
-          console.log("ALL TMDB 5114 TARGETS");
-          console.log("========================================");
-
-          const allMatches = [];
-
-          for (const [source, targets] of Object.entries(raw)) {
-            if (!targets || typeof targets !== "object") {
-              continue;
-            }
-
-            for (const [targetKey, mapping] of Object.entries(targets)) {
-              if (targetKey.startsWith(`tmdb_show:${tmdbId}:`)) {
-                allMatches.push({
-                  source,
-                  target: targetKey,
-                  mapping
-                });
-              }
-            }
-          }
-
           console.log(
-            "All TMDB 5114 matches:",
-            allMatches.length
+            "AniList results:",
+            results.length
           );
 
-          for (const match of allMatches) {
+          for (const anime of results) {
             console.log("");
-            console.log("SOURCE:", match.source);
-            console.log("TARGET:", match.target);
+            console.log("────────────────────");
+            console.log("AniList ID:", anime.id);
+            console.log("MAL ID:", anime.idMal);
             console.log(
-              "MAPPING:",
-              JSON.stringify(match.mapping)
+              "Romaji:",
+              anime.title?.romaji
             );
-          }
-
-          // ========================================
-          // SEARCH IMDb tt0324431 ANYWHERE
-          // ========================================
-
-          console.log("");
-          console.log("========================================");
-          console.log("SEARCH IMDb tt0324431 ANYWHERE");
-          console.log("========================================");
-
-          const imdbId = "tt0324431";
-          const imdbNeedle = `imdb_movie:${imdbId}`;
-
-          const imdbMatches = [];
-
-          for (const [source, targets] of Object.entries(raw)) {
-
-            if (source === imdbNeedle) {
-              imdbMatches.push({
-                location: "SOURCE",
-                source,
-                targets
-              });
-              continue;
-            }
-
-            if (!targets || typeof targets !== "object") {
-              continue;
-            }
-
-            for (const [targetKey, mapping] of Object.entries(targets)) {
-              if (targetKey === imdbNeedle) {
-                imdbMatches.push({
-                  location: "TARGET",
-                  source,
-                  target: targetKey,
-                  mapping
-                });
-              }
-            }
-          }
-
-          console.log(
-            "IMDb matches:",
-            imdbMatches.length
-          );
-
-          for (const match of imdbMatches.slice(0, 20)) {
-            console.log("");
             console.log(
-              JSON.stringify(match, null, 2)
+              "English:",
+              anime.title?.english
             );
-          }
-
-          // ========================================
-          // FIND ANILIST CONNECTIONS FOR TMDB 5114
-          // ========================================
-
-          console.log("");
-          console.log("========================================");
-          console.log("ANILIST CONNECTIONS");
-          console.log("========================================");
-
-          const anilistConnections = [];
-
-          for (const match of allMatches) {
-            const source = match.source;
-            const targets = raw[source];
-
-            if (!targets || typeof targets !== "object") {
-              continue;
-            }
-
-            for (const [targetKey, mapping] of Object.entries(targets)) {
-              if (targetKey.startsWith("anilist:")) {
-                anilistConnections.push({
-                  source,
-                  anilist: targetKey,
-                  mapping
-                });
-              }
-            }
-          }
-
-          console.log(
-            "AniList connections:",
-            anilistConnections.length
-          );
-
-          for (const connection of anilistConnections) {
-            console.log("");
             console.log(
-              JSON.stringify(connection, null, 2)
+              "Native:",
+              anime.title?.native
+            );
+            console.log(
+              "Season:",
+              anime.season
+            );
+            console.log(
+              "Year:",
+              anime.seasonYear
+            );
+            console.log(
+              "Episodes:",
+              anime.episodes
+            );
+            console.log(
+              "Format:",
+              anime.format
             );
           }
 
@@ -227,4 +171,4 @@ jobs:
           console.log("========================================");
           EOF
 
-          node inspect.js
+          node test.js
