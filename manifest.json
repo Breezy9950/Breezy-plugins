@@ -1,20 +1,20 @@
 {
-  "name": "ReAnime-Nuvio",
-  "version": "1.0.0",
-  "scrapers": [
+  "name":"AniZone-Nuvio",
+  "version":"1.0.0",
+  "scrapers":[
     {
-      "id": "reanime",
-      "name": "Reanime",
-      "description": "Reanime anime streaming with automated AniList mapping and subtitle support",
-      "version": "1.0.0",
-      "author": "Nuvio Team",
-      "supportedTypes": ["movie", "tv"],
-      "filename": "providers/reanime.js",
-      "enabled": true,
-      "hasSettings": true,
-      "formats": ["m3u8", "mkv"],
-      "logo": "https://www.google.com/s2/favicons?domain=reanime.to&sz=128",
-      "contentLanguage": ["en", "ja"]
+      "id":"anizone",
+      "name":"AniZone",
+      "description":"AniZone anime streaming with automatic anime mapping and multi-server stream support",
+      "version":"1.0.0",
+      "author":"Nuvio Team",
+      "supportedTypes":["movie","tv"],
+      "filename":"providers/anizone.js",
+      "enabled":true,
+      "hasSettings":true,
+      "formats":["m3u8"],
+      "logo":"https://www.google.com/s2/favicons?domain=anizone.to&sz=128",
+      "contentLanguage":["en","ja"]
     }
   ]
 }
