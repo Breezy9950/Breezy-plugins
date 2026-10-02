@@ -1,4 +1,4 @@
-name: ReAnime Provider Diagnostic
+name: AniZone Provider Diagnostic
 
 on:
   workflow_dispatch:
@@ -6,483 +6,97 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: Breezy9950-patch-2
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install dependency
-        run: npm install crypto-js
+      - name: Install dependencies
+        run: npm install cheerio-without-node-native
 
-      - name: Verify provider exists
+      - name: Verify provider
         run: |
           echo "========================================"
-          echo "REANIME PROVIDER DIAGNOSTIC"
+          echo "ANIZONE PROVIDER DIAGNOSTIC"
           echo "========================================"
-          echo "Branch : Breezy9950-patch-2"
-          echo "File   : providers/reanime.js"
+          echo "File: providers/anizone.js"
           echo "========================================"
-
-          if [ ! -f "providers/reanime.js" ]; then
-            echo "ERROR: providers/reanime.js does not exist"
+          if [ ! -f "providers/anizone.js" ]; then
+            echo "ERROR: providers/anizone.js does not exist"
             exit 1
           fi
-
-          node --check providers/reanime.js
+          node --check providers/anizone.js
 
       - name: Create diagnostic test
         run: |
-          cat > test-reanime.mjs <<'EOF'
-          import fs from "fs";
+          cat > test-anizone.mjs <<'EOF'
+          const provider = await import("./providers/anizone.js");
 
-          const TMDB_KEY = "439c478a771f35c05022f9feabcca01c";
+          if (typeof provider.getStreams !== "function") {
+            throw new Error("getStreams() export missing");
+          }
 
-          const FRIBB_URL =
-            "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json";
+          const tests = [
+            {
+              name: "Bleach S1E4",
+              tmdbId: "30984",
+              type: "tv",
+              season: 1,
+              episode: 4
+            }
+          ];
 
-          const USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-          function section(title) {
+          for (const test of tests) {
             console.log("");
             console.log("============================================================");
-            console.log(title);
+            console.log(`TEST: ${test.name}`);
             console.log("============================================================");
-          }
+            console.log(`TMDB=${test.tmdbId} TYPE=${test.type} S${test.season}E${test.episode}`);
 
-          async function fetchJson(url, options = {}) {
-            const response = await fetch(url, {
-              ...options,
-              headers: {
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json, text/plain, */*",
-                ...(options.headers || {})
-              }
-            });
-
-            const text = await response.text();
-
-            console.log(
-              `[HTTP] ${response.status} ${response.statusText} ${url}`
-            );
-
-            if (!response.ok) {
-              throw new Error(
-                `HTTP ${response.status}: ${url}\n${text.slice(0, 500)}`
+            try {
+              const streams = await provider.getStreams(
+                test.tmdbId,
+                test.type,
+                test.season,
+                test.episode
               );
-            }
 
-            return JSON.parse(text);
-          }
-
-          async function searchTMDB(query, type) {
-            section(`TMDB SEARCH: ${query}`);
-
-            const url =
-              `https://api.themoviedb.org/3/search/${type}` +
-              `?api_key=${TMDB_KEY}` +
-              `&query=${encodeURIComponent(query)}`;
-
-            const data = await fetchJson(url);
-
-            const results = data.results || [];
-
-            console.log(`TMDB results: ${results.length}`);
-
-            results.slice(0, 10).forEach((item, index) => {
-              console.log(
-                `${index + 1}. ID=${item.id}` +
-                ` | ${item.title || item.name}` +
-                ` | original=${item.original_title || item.original_name}` +
-                ` | date=${item.release_date || item.first_air_date || ""}`
-              );
-            });
-
-            return results;
-          }
-
-          async function findExactTMDB(query, type, expectedTitle) {
-            const results = await searchTMDB(query, type);
-
-            const wanted = expectedTitle.toLowerCase();
-
-            const exact = results.find(item => {
-              const title =
-                String(item.title || item.name || "").toLowerCase();
-
-              const original =
-                String(
-                  item.original_title ||
-                  item.original_name ||
-                  ""
-                ).toLowerCase();
-
-              return title === wanted || original === wanted;
-            });
-
-            if (!exact) {
-              throw new Error(
-                `Could not find exact TMDB result for "${expectedTitle}"`
-              );
-            }
-
-            console.log("");
-            console.log(
-              `SELECTED: ${exact.id} | ` +
-              `${exact.title || exact.name} | ` +
-              `${exact.release_date || exact.first_air_date || ""}`
-            );
-
-            return exact.id;
-          }
-
-          async function inspectFribb(tmdbId) {
-            section(`FRIBB RAW INSPECTION: TMDB ${tmdbId}`);
-
-            const response = await fetch(FRIBB_URL, {
-              headers: {
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json"
-              }
-            });
-
-            console.log(
-              `[FRIBB HTTP] ${response.status} ${response.statusText}`
-            );
-
-            if (!response.ok) {
-              throw new Error(
-                `Fribb HTTP ${response.status}`
-              );
-            }
-
-            const data = await response.json();
-
-            console.log(
-              `Fribb entries loaded: ${
-                Array.isArray(data) ? data.length : Object.keys(data).length
-              }`
-            );
-
-            const entries = Array.isArray(data)
-              ? data
-              : Object.values(data);
-
-            const matches = [];
-
-            for (const entry of entries) {
-              const tmdb =
-                entry?.themoviedb_id?.tv ??
-                entry?.themoviedb_id?.movie ??
-                entry?.themoviedb_id;
-
-              const values = Array.isArray(tmdb)
-                ? tmdb
-                : [tmdb];
-
-              if (
-                values.some(
-                  value => String(value) === String(tmdbId)
-                )
-              ) {
-                matches.push(entry);
-              }
-            }
-
-            console.log("");
-            console.log(
-              `MATCHES FOR TMDB ${tmdbId}: ${matches.length}`
-            );
-
-            if (matches.length === 0) {
-              console.log(
-                "NO FRIBB ENTRY FOUND FOR THIS TMDB ID."
-              );
-              return;
-            }
-
-            matches.forEach((entry, index) => {
               console.log("");
-              console.log(`----- FRIBB MATCH ${index + 1} -----`);
+              console.log(`RESULT: ${streams.length} stream(s)`);
 
-              console.log(
-                "AniList ID:",
-                entry.anilist_id ?? "NONE"
-              );
-
-              console.log(
-                "Kitsu ID:",
-                entry.kitsu_id ?? "NONE"
-              );
-
-              console.log(
-                "MAL ID:",
-                entry.mal_id ?? "NONE"
-              );
-
-              console.log(
-                "TMDB:",
-                JSON.stringify(entry.themoviedb_id, null, 2)
-              );
-
-              console.log(
-                "IMDb:",
-                JSON.stringify(entry.imdb_id, null, 2)
-              );
-
-              console.log(
-                "Season:",
-                JSON.stringify(entry.season, null, 2)
-              );
-
-              console.log(
-                "Episode Offset:",
-                JSON.stringify(
-                  entry.episode_offset,
-                  null,
-                  2
-                )
-              );
-
-              console.log(
-                "Title:",
-                JSON.stringify(entry.title, null, 2)
-              );
-            });
-          }
-
-          async function getTMDBDetails(tmdbId, type) {
-            const endpoint =
-              type === "tv" ? "tv" : "movie";
-
-            return fetchJson(
-              `https://api.themoviedb.org/3/${endpoint}/${tmdbId}` +
-              `?api_key=${TMDB_KEY}` +
-              `&append_to_response=external_ids`
-            );
-          }
-
-          async function runProvider(
-            label,
-            tmdbId,
-            mediaType,
-            season,
-            episode
-          ) {
-            section(
-              `PROVIDER TEST: ${label}`
-            );
-
-            console.log(
-              `TMDB=${tmdbId}` +
-              ` TYPE=${mediaType}` +
-              ` S${season ?? "-"}E${episode ?? "-"}`
-            );
-
-            const details =
-              await getTMDBDetails(
-                tmdbId,
-                mediaType
-              );
-
-            console.log(
-              "TMDB TITLE:",
-              details.name ||
-              details.title ||
-              details.original_name ||
-              details.original_title ||
-              "UNKNOWN"
-            );
-
-            console.log(
-              "TMDB RELEASE:",
-              details.first_air_date ||
-              details.release_date ||
-              "UNKNOWN"
-            );
-
-            console.log(
-              "TMDB IMDb:",
-              details.external_ids?.imdb_id ||
-              "NONE"
-            );
-
-            console.log("");
-            console.log("Loading provider...");
-
-            const provider =
-              await import(
-                "./providers/reanime.js"
-              );
-
-            console.log(
-              "Provider exports:",
-              Object.keys(provider)
-            );
-
-            if (
-              typeof provider.getStreams !==
-              "function"
-            ) {
-              throw new Error(
-                "getStreams() export missing"
-              );
+              streams.forEach((stream, index) => {
+                console.log("");
+                console.log(`STREAM ${index + 1}`);
+                console.log(`name: ${stream.name}`);
+                console.log(`title: ${stream.title}`);
+                console.log(`quality: ${stream.quality}`);
+                console.log(`type: ${stream.type}`);
+                console.log(`url: ${stream.url || "NONE"}`);
+                console.log(`subtitles: ${stream.subtitles?.length || 0}`);
+              });
+            } catch (error) {
+              console.error(`TEST FAILED: ${error.message}`);
+              process.exitCode = 1;
             }
-
-            console.log("");
-            console.log("Calling getStreams()...");
-
-            const streams =
-              await provider.getStreams(
-                String(tmdbId),
-                mediaType,
-                season,
-                episode
-              );
-
-            console.log("");
-            console.log(
-              `PROVIDER RESULT: ${streams.length} stream(s)`
-            );
-
-            if (streams.length === 0) {
-              console.log(
-                "NO STREAMS RETURNED."
-              );
-              return;
-            }
-
-            streams.forEach((stream, index) => {
-              console.log("");
-              console.log(
-                `STREAM ${index + 1}`
-              );
-
-              console.log(
-                "name:",
-                stream.name
-              );
-
-              console.log(
-                "title:",
-                stream.title
-              );
-
-              console.log(
-                "quality:",
-                stream.quality
-              );
-
-              console.log(
-                "size:",
-                stream.size
-              );
-
-              console.log(
-                "type:",
-                stream.type
-              );
-
-              console.log(
-                "provider:",
-                stream.provider
-              );
-
-              console.log(
-                "has URL:",
-                Boolean(stream.url)
-              );
-            });
           }
 
-          // ============================================================
-          // TEST 1
-          // Demon Slayer: Infinity Castle
-          //
-          // IMPORTANT:
-          // Do NOT search this one because TMDB search can put Mugen
-          // Train first.
-          // ============================================================
-
-          const infinityCastleId = 1311031;
-
-          await inspectFribb(infinityCastleId);
-
-          await runProvider(
-            "Demon Slayer: Infinity Castle",
-            infinityCastleId,
-            "movie",
-            null,
-            null
-          );
-
-          // ============================================================
-          // TEST 2
-          // You and I Are Polar Opposites
-          // ============================================================
-
-          const polarId =
-            await findExactTMDB(
-              "You and I Are Polar Opposites",
-              "tv",
-              "You and I Are Polar Opposites"
-            );
-
-          await inspectFribb(polarId);
-
-          await runProvider(
-            "You and I Are Polar Opposites S2E1",
-            polarId,
-            "tv",
-            2,
-            1
-          );
-
-          // ============================================================
-          // TEST 3
-          // Re:ZERO
-          //
-          // Known TMDB:
-          // 65942
-          //
-          // First inspect ALL Fribb entries for the show, regardless
-          // of season. This tells us exactly how S3 is represented.
-          // ============================================================
-
-          const rezeroId = 65942;
-
-          await inspectFribb(rezeroId);
-
-          await runProvider(
-            "Re:ZERO S3E1",
-            rezeroId,
-            "tv",
-            3,
-            1
-          );
-
-          section("DIAGNOSTIC COMPLETE");
-
-          console.log(
-            "All requested tests finished."
-          );
+          console.log("");
+          console.log("============================================================");
+          console.log("ANIZONE DIAGNOSTIC COMPLETE");
+          console.log("============================================================");
           EOF
 
       - name: Run diagnostic
         run: |
-          node test-reanime.mjs 2>&1 | tee reanime-diagnostic.log
+          node test-anizone.mjs 2>&1 | tee anizone-diagnostic.log
 
       - name: Upload diagnostic log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reanime-diagnostic
-          path: reanime-diagnostic.log
+          name: anizone-diagnostic
+          path: anizone-diagnostic.log
