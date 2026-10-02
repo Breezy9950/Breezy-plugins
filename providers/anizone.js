@@ -46,6 +46,7 @@ var INVALID_BACKSLASH=/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g;
 var MAPPING_CACHE=new Map;
 var SEARCH_CACHE=new Map;
 var SLUG_CACHE=new Map;
+var IMDB_CACHE=new Map;
 var MAX_CACHE=300;
 
 function cacheSet(cache,key,value){
@@ -114,12 +115,19 @@ function fetchWithCookies(_0){
 
 function getImdbId(tmdbId,mediaType){
   return __async(this,null,function*(){
+    var key=`${mediaType}:${tmdbId}`;
+    if(IMDB_CACHE.has(key)){
+      console.log(`[AniZone] IMDb cache hit: ${key}`);
+      return IMDB_CACHE.get(key);
+    }
     try{
       var url=`https://api.themoviedb.org/3/${mediaType==="tv"?"tv":"movie"}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
       var res=yield fetchWithTimeout(url,{},4e3);
       if(!res.ok)return null;
       var data=yield res.json();
-      return data.imdb_id||null;
+      var id=data.imdb_id||null;
+      if(id)cacheSet(IMDB_CACHE,key,id);
+      return id;
     }catch(_){return null;}
   });
 }
@@ -129,6 +137,76 @@ function isDateMatch(d1,d2){
   var s1=d1.split("T")[0],s2=d2.split("T")[0];
   var date1=new Date(s1+"T00:00:00Z"),date2=new Date(s2+"T00:00:00Z");
   return Math.ceil(Math.abs(date1.getTime()-date2.getTime())/(1e3*60*60*24))<=2;
+}
+
+function getAniZipTmdbMapping(tmdbId,imdbId){
+  return __async(this,null,function*(){
+    try{
+      var url=tmdbId
+        ?`https://api.ani.zip/mappings?themoviedb_id=${tmdbId}`
+        :`https://api.ani.zip/mappings?imdb_id=${imdbId}`;
+      var r=yield fetchWithTimeout(url,{},3e3);
+      if(!r.ok)return null;
+      var d=yield r.json();
+      return d&&d.mappings?d:null;
+    }catch(_){return null;}
+  });
+}
+
+function getTmdbEpisodeData(tmdbId,season,episode){
+  return __async(this,null,function*(){
+    if(!tmdbId)return null;
+    try{
+      var epUrl=`https://api.themoviedb.org/3/tv/${tmdbId}/season/${parseInt(season,10)}/episode/${parseInt(episode,10)}?api_key=${TMDB_API_KEY}`;
+      var epRes=yield fetchWithTimeout(epUrl,{},4e3);
+      if(!epRes.ok)return null;
+      var epData=yield epRes.json();
+      if(!epData)return null;
+      return{
+        airDate:epData.air_date||"",
+        episode:parseInt(episode,10),
+        season:parseInt(season,10)
+      };
+    }catch(_){return null;}
+  });
+}
+
+function buildMappingFromAniZip(data,tmdbId,imdbId,season,episode,airDate,showTitle){
+  if(!data||!data.mappings||!data.mappings.mal_id)return null;
+  var malId=data.mappings.mal_id;
+  if(!malId)return null;
+  return __async(this,null,function*(){
+    try{
+      var r=yield fetchWithTimeout(`https://api.ani.zip/mappings?mal_id=${malId}`,{},3e3);
+      if(!r.ok)return null;
+      var d=yield r.json();
+      if(!d||!d.episodes)return null;
+
+      var eps=Object.values(d.episodes).map(ep=>({
+        mal_episode_number:parseInt(ep.episode,10),
+        air_date:ep.airDateUtc||ep.airDate||ep.airdate
+      })).filter(ep=>!isNaN(ep.mal_episode_number));
+
+      var matches=eps.filter(ep=>isDateMatch(ep.air_date,airDate)).sort((a,b)=>a.mal_episode_number-b.mal_episode_number);
+
+      if(!matches.length)return null;
+
+      var dayIndex=matches.findIndex(ep=>ep.mal_episode_number===parseInt(episode,10));
+      var selected=matches[dayIndex>=0?dayIndex:0];
+
+      return{
+        id:`${imdbId}:s${season}:e${episode}`,
+        imdb_id:imdbId,
+        season:parseInt(season,10),
+        episode:parseInt(episode,10),
+        mal_id:malId,
+        mal_episode:selected.mal_episode_number,
+        anime_title:showTitle||"",
+        titles:d.titles?Object.values(d.titles).filter(Boolean):[],
+        air_date:airDate
+      };
+    }catch(_){return null;}
+  });
 }
 
 function resolveMapping(imdbId,season,episode,tmdbId){
@@ -142,6 +220,45 @@ function resolveMapping(imdbId,season,episode,tmdbId){
     var seasonNum=parseInt(season,10);
     var episodeNum=parseInt(episode,10);
     var mapId=`${imdbId}:s${season}:e${episode}`;
+
+    try{
+      var fastResults=yield Promise.all([
+        getTmdbEpisodeData(tmdbId,seasonNum,episodeNum),
+        getAniZipTmdbMapping(tmdbId,imdbId),
+        fetchWithTimeout(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`,{},4e3)
+      ]);
+
+      var epInfo=fastResults[0];
+      var aniData=fastResults[1];
+      var tvRes=fastResults[2];
+      var showTitle="";
+
+      if(tvRes&&tvRes.ok){
+        try{
+          var tvData=yield tvRes.json();
+          showTitle=tvData.name||tvData.original_name||"";
+        }catch(_){}
+      }
+
+      if(epInfo&&epInfo.airDate&&aniData&&aniData.mappings&&aniData.mappings.mal_id){
+        var fastMapping=yield buildMappingFromAniZip(
+          aniData,
+          tmdbId,
+          imdbId,
+          seasonNum,
+          episodeNum,
+          epInfo.airDate,
+          showTitle
+        );
+
+        if(fastMapping){
+          console.log(`[AniZone] Fast Ani.zip mapping: MAL ${fastMapping.mal_id} -> episode ${fastMapping.mal_episode}`);
+          cacheSet(MAPPING_CACHE,cacheKey,fastMapping);
+          return fastMapping;
+        }
+      }
+    }catch(_){}
+
     var metaData=null;
 
     try{
@@ -439,6 +556,69 @@ function matchMovieCard(cards,targetTitles){
   return cards[0]?cards[0].slug:null;
 }
 
+function cleanSubtitleUrl(url){
+  if(!url||typeof url!=="string")return"";
+  var value=url.replace(/\\/g,"").trim();
+  if(!/^https?:\/\//i.test(value))return"";
+  return value;
+}
+
+function normalizeSubtitleLanguage(value){
+  if(!value)return"en";
+  var v=String(value).toLowerCase().trim();
+  if(v==="en"||v==="eng"||v==="english"||v.startsWith("en-"))return"en";
+  if(v==="ja"||v==="jpn"||v==="japanese"||v.startsWith("ja-"))return"ja";
+  return v.length<=10?v:"en";
+}
+
+function parseSubtitleTracks(data){
+  if(!data||!Array.isArray(data.subtitles))return[];
+
+  var tracks=[];
+  var seen=new Set;
+
+  for(var i=0;i<data.subtitles.length;i++){
+    var s=data.subtitles[i];
+    if(!s||typeof s!=="object")continue;
+
+    var url=cleanSubtitleUrl(s.file||s.url||s.src);
+    if(!url||seen.has(url))continue;
+
+    var lang=normalizeSubtitleLanguage(s.language||s.lang||s.locale);
+    var format=String(s.format||"").toLowerCase();
+    var title=String(s.title||s.name||s.label||"English").trim();
+
+    if(format&&["vtt","webvtt","srt","ass","ssa"].indexOf(format)<0){
+      if(!/\.(vtt|srt|ass|ssa)(?:$|\?)/i.test(url))continue;
+    }
+
+    seen.add(url);
+
+    tracks.push({
+      id:`anizone-${i}-${Buffer.from(url).toString("base64").replace(/[^a-zA-Z0-9]/g,"").slice(-24)}`,
+      url,
+      lang,
+      label:title||"English"
+    });
+  }
+
+  var english=tracks.filter(t=>t.lang==="en");
+  var defaults=data.subtitles.filter(s=>s&&s.default===true);
+  var defaultEnglish=[];
+
+  for(var d of defaults){
+    var du=cleanSubtitleUrl(d.file||d.url||d.src);
+    if(du){
+      var found=tracks.find(t=>t.url===du&&t.lang==="en");
+      if(found)defaultEnglish.push(found);
+    }
+  }
+
+  if(defaultEnglish.length)return defaultEnglish;
+  if(english.length)return english;
+  return tracks.slice(0,1);
+}
+
 function parseVidstackFromHtml(html,$){
   var vidMatch=html.match(/vidstackPlayer\(JSON\.parse\('((?:[^'\\]|\\.)*)'\)\)/);
 
@@ -446,11 +626,7 @@ function parseVidstackFromHtml(html,$){
     try{
       var d=parseXDataJson(vidMatch[1]);
       var master=d.src?d.src.replace(/\\/g,""):null;
-      var subs=(d.subtitles||[]).map(s=>({
-        url:s.file?s.file.replace(/\\/g,""):"",
-        name:s.title||s.language||"English",
-        language:s.language||"en"
-      })).filter(s=>s.url);
+      var subs=parseSubtitleTracks(d);
       if(master)return{masterUrl:master,subtitles:subs};
     }catch(_){}
   }
@@ -464,17 +640,25 @@ function parseVidstackFromHtml(html,$){
 
   var subtitles=[];
   $("track").each((i,el)=>{
-    var src=$(el).attr("src");
+    var src=cleanSubtitleUrl($(el).attr("src"));
     var kind=$(el).attr("kind");
-    if(src&&(kind==="subtitles"||kind==="captions"||src.endsWith(".ass")||src.endsWith(".vtt")))
+    if(src&&(kind==="subtitles"||kind==="captions"||/\.(ass|ssa|srt|vtt)(?:$|\?)/i.test(src))){
+      var lang=normalizeSubtitleLanguage($(el).attr("srclang")||$(el).attr("lang")||"en");
       subtitles.push({
+        id:`anizone-track-${i}`,
         url:src,
-        name:$(el).attr("label")||"English",
-        language:$(el).attr("srclang")||"en"
+        lang,
+        label:$(el).attr("label")||"English"
       });
+    }
   });
 
-  return{masterUrl,subtitles};
+  var english=subtitles.filter(s=>s.lang==="en");
+
+  return{
+    masterUrl,
+    subtitles:english.length?english:subtitles.slice(0,1)
+  };
 }
 
 function parseAudioFormat(text){
@@ -528,8 +712,6 @@ function isDubFormat(format){
 
 function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
   return __async(this,null,function*(){
-    var _a,_b,_c;
-
     try{
       console.log(`[AniZone] Querying streams for TMDB: ${tmdbId}, Type: ${mediaType}, S${season}E${episode}`);
 
@@ -662,7 +844,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
 
       addStream(defaultStream,defaultServerName,defaultFormat);
 
-      if(serverButtons.length&&epResponse.cookies){
+      if(serverButtons.length>1&&epResponse.cookies){
         var csrfToken=$ep("script[data-csrf]").attr("data-csrf");
         var snapshotEl=$ep("main > div[wire\\:snapshot],main > ul[wire\\:snapshot],[wire\\:snapshot]");
         var snapshot=snapshotEl.attr("wire:snapshot");
@@ -670,7 +852,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
         if(csrfToken&&snapshot){
           var tasks=[];
 
-          for(let i=0;i<serverButtons.length;i++){
+          for(let i=1;i<serverButtons.length;i++){
             let btn=serverButtons.eq(i);
             let click=btn.attr("wire:click")||"";
             let match=click.match(/setVideo\((\d+)\)/);
@@ -708,7 +890,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
                     "Cookie":epResponse.cookies
                   },
                   body:JSON.stringify(payload)
-                },6e3);
+                },5e3);
 
                 if(!r.ok)return;
 
