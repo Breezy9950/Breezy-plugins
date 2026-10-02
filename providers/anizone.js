@@ -464,50 +464,11 @@ function normalizeSubtitleLanguage(value){
 
 function parseSubtitleTracks(data){
   if(!data||!Array.isArray(data.subtitles))return[];
-
-  var tracks=[];
-  var seen=new Set;
-
-  for(var i=0;i<data.subtitles.length;i++){
-    var s=data.subtitles[i];
-    if(!s||typeof s!=="object")continue;
-
-    var url=cleanSubtitleUrl(s.file||s.url||s.src);
-    if(!url||seen.has(url))continue;
-
-    var lang=normalizeSubtitleLanguage(s.language||s.lang||s.locale);
-    var format=String(s.format||"").toLowerCase();
-    var title=String(s.title||s.name||s.label||"English").trim();
-
-    if(format&&["vtt","webvtt","srt","ass","ssa"].indexOf(format)<0){
-      if(!/\.(vtt|srt|ass|ssa)(?:$|\?)/i.test(url))continue;
-    }
-
-    seen.add(url);
-
-    tracks.push({
-      id:`anizone-${i}`,
-      url:url,
-      lang:lang,
-      label:title||"English"
-    });
-  }
-
-  var english=tracks.filter(t=>t.lang==="en");
-  var defaults=data.subtitles.filter(s=>s&&s.default===true);
-  var defaultEnglish=[];
-
-  for(var d of defaults){
-    var du=cleanSubtitleUrl(d.file||d.url||d.src);
-    if(du){
-      var found=tracks.find(t=>t.url===du&&t.lang==="en");
-      if(found)defaultEnglish.push(found);
-    }
-  }
-
-  if(defaultEnglish.length)return defaultEnglish;
-  if(english.length)return english;
-  return tracks.slice(0,1);
+  return data.subtitles.map(s=>({
+    url:s&&s.file?s.file.replace(/\\/g,""):"",
+    name:s&&s.title||s&&s.language||"English",
+    language:s&&s.language||"en"
+  })).filter(s=>s.url);
 }
 
 function parseVidstackFromHtml(html,$){
@@ -531,24 +492,20 @@ function parseVidstackFromHtml(html,$){
 
   var subtitles=[];
   $("track").each((i,el)=>{
-    var src=cleanSubtitleUrl($(el).attr("src"));
+    var src=$(el).attr("src");
     var kind=$(el).attr("kind");
-    if(src&&(kind==="subtitles"||kind==="captions"||/\.(ass|ssa|srt|vtt)(?:$|\?)/i.test(src))){
-      var lang=normalizeSubtitleLanguage($(el).attr("srclang")||$(el).attr("lang")||"en");
+    if(src&&(kind==="subtitles"||kind==="captions"||src.endsWith(".ass")||src.endsWith(".vtt"))){
       subtitles.push({
-        id:`anizone-track-${i}`,
         url:src,
-        lang:lang,
-        label:$(el).attr("label")||"English"
+        name:$(el).attr("label")||"English",
+        language:$(el).attr("srclang")||"en"
       });
     }
   });
 
-  var english=subtitles.filter(s=>s.lang==="en");
-
   return{
     masterUrl:masterUrl,
-    subtitles:english.length?english:subtitles.slice(0,1)
+    subtitles:subtitles
   };
 }
 
