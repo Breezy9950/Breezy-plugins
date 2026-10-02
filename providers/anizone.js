@@ -139,76 +139,6 @@ function isDateMatch(d1,d2){
   return Math.ceil(Math.abs(date1.getTime()-date2.getTime())/(1e3*60*60*24))<=2;
 }
 
-function getAniZipTmdbMapping(tmdbId,imdbId){
-  return __async(this,null,function*(){
-    try{
-      var url=tmdbId
-        ?`https://api.ani.zip/mappings?themoviedb_id=${tmdbId}`
-        :`https://api.ani.zip/mappings?imdb_id=${imdbId}`;
-      var r=yield fetchWithTimeout(url,{},3e3);
-      if(!r.ok)return null;
-      var d=yield r.json();
-      return d&&d.mappings?d:null;
-    }catch(_){return null;}
-  });
-}
-
-function getTmdbEpisodeData(tmdbId,season,episode){
-  return __async(this,null,function*(){
-    if(!tmdbId)return null;
-    try{
-      var epUrl=`https://api.themoviedb.org/3/tv/${tmdbId}/season/${parseInt(season,10)}/episode/${parseInt(episode,10)}?api_key=${TMDB_API_KEY}`;
-      var epRes=yield fetchWithTimeout(epUrl,{},4e3);
-      if(!epRes.ok)return null;
-      var epData=yield epRes.json();
-      if(!epData)return null;
-      return{
-        airDate:epData.air_date||"",
-        episode:parseInt(episode,10),
-        season:parseInt(season,10)
-      };
-    }catch(_){return null;}
-  });
-}
-
-function buildMappingFromAniZip(data,tmdbId,imdbId,season,episode,airDate,showTitle){
-  if(!data||!data.mappings||!data.mappings.mal_id)return null;
-  var malId=data.mappings.mal_id;
-  if(!malId)return null;
-  return __async(this,null,function*(){
-    try{
-      var r=yield fetchWithTimeout(`https://api.ani.zip/mappings?mal_id=${malId}`,{},3e3);
-      if(!r.ok)return null;
-      var d=yield r.json();
-      if(!d||!d.episodes)return null;
-
-      var eps=Object.values(d.episodes).map(ep=>({
-        mal_episode_number:parseInt(ep.episode,10),
-        air_date:ep.airDateUtc||ep.airDate||ep.airdate
-      })).filter(ep=>!isNaN(ep.mal_episode_number));
-
-      var matches=eps.filter(ep=>isDateMatch(ep.air_date,airDate)).sort((a,b)=>a.mal_episode_number-b.mal_episode_number);
-
-      if(!matches.length)return null;
-
-      var dayIndex=matches.findIndex(ep=>ep.mal_episode_number===parseInt(episode,10));
-      var selected=matches[dayIndex>=0?dayIndex:0];
-
-      return{
-        id:`${imdbId}:s${season}:e${episode}`,
-        imdb_id:imdbId,
-        season:parseInt(season,10),
-        episode:parseInt(episode,10),
-        mal_id:malId,
-        mal_episode:selected.mal_episode_number,
-        anime_title:showTitle||"",
-        titles:d.titles?Object.values(d.titles).filter(Boolean):[],
-        air_date:airDate
-      };
-    }catch(_){return null;}
-  });
-}
-
 function resolveMapping(imdbId,season,episode,tmdbId){
   return __async(this,null,function*(){
     var cacheKey=`${imdbId}:s${season}:e${episode}`;
@@ -220,45 +150,6 @@ function resolveMapping(imdbId,season,episode,tmdbId){
     var seasonNum=parseInt(season,10);
     var episodeNum=parseInt(episode,10);
     var mapId=`${imdbId}:s${season}:e${episode}`;
-
-    try{
-      var fastResults=yield Promise.all([
-        getTmdbEpisodeData(tmdbId,seasonNum,episodeNum),
-        getAniZipTmdbMapping(tmdbId,imdbId),
-        fetchWithTimeout(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`,{},4e3)
-      ]);
-
-      var epInfo=fastResults[0];
-      var aniData=fastResults[1];
-      var tvRes=fastResults[2];
-      var showTitle="";
-
-      if(tvRes&&tvRes.ok){
-        try{
-          var tvData=yield tvRes.json();
-          showTitle=tvData.name||tvData.original_name||"";
-        }catch(_){}
-      }
-
-      if(epInfo&&epInfo.airDate&&aniData&&aniData.mappings&&aniData.mappings.mal_id){
-        var fastMapping=yield buildMappingFromAniZip(
-          aniData,
-          tmdbId,
-          imdbId,
-          seasonNum,
-          episodeNum,
-          epInfo.airDate,
-          showTitle
-        );
-
-        if(fastMapping){
-          console.log(`[AniZone] Fast Ani.zip mapping: MAL ${fastMapping.mal_id} -> episode ${fastMapping.mal_episode}`);
-          cacheSet(MAPPING_CACHE,cacheKey,fastMapping);
-          return fastMapping;
-        }
-      }
-    }catch(_){}
-
     var metaData=null;
 
     try{
@@ -595,9 +486,9 @@ function parseSubtitleTracks(data){
     seen.add(url);
 
     tracks.push({
-      id:`anizone-${i}-${Buffer.from(url).toString("base64").replace(/[^a-zA-Z0-9]/g,"").slice(-24)}`,
-      url,
-      lang,
+      id:`anizone-${i}`,
+      url:url,
+      lang:lang,
       label:title||"English"
     });
   }
@@ -647,7 +538,7 @@ function parseVidstackFromHtml(html,$){
       subtitles.push({
         id:`anizone-track-${i}`,
         url:src,
-        lang,
+        lang:lang,
         label:$(el).attr("label")||"English"
       });
     }
@@ -656,7 +547,7 @@ function parseVidstackFromHtml(html,$){
   var english=subtitles.filter(s=>s.lang==="en");
 
   return{
-    masterUrl,
+    masterUrl:masterUrl,
     subtitles:english.length?english:subtitles.slice(0,1)
   };
 }
