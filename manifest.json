@@ -1,1 +1,34 @@
-{"name":"AniZone-Nuvio","version":"1.0.0","scrapers":[{"id":"anizone","name":"AniZone","description":"AniZone anime streaming with multi-server stream support","version":"1.0.0","author":"Nuvio Team","supportedTypes":["movie","tv"],"filename":"providers/anizone.js","enabled":true,"hasSettings":true,"formats":["m3u8"],"logo":"https://www.google.com/s2/favicons?domain=anizone.to&sz=128","contentLanguage":["en","ja"]}]}
+{
+  "name": "AniZone-Nuvio",
+  "version": "1.0.0",
+  "scrapers": [
+    {
+      "id": "anizone",
+      "name": "AniZone",
+      "description": "AniZone anime streaming with multi-server stream support",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/anizone.js",
+      "enabled": true,
+      "hasSettings": true,
+      "formats": ["m3u8"],
+      "logo": "https://www.google.com/s2/favicons?domain=anizone.to&sz=128",
+      "contentLanguage": ["en", "ja"]
+    },
+    {
+      "id": "anizone-animestream",
+      "name": "AniZone AnimeStream",
+      "description": "AniZone streaming using the AnimeStream-style fast resolver",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/anizone-animestream.js",
+      "enabled": true,
+      "hasSettings": true,
+      "formats": ["m3u8"],
+      "logo": "https://www.google.com/s2/favicons?domain=anizone.to&sz=128",
+      "contentLanguage": ["en", "ja"]
+    }
+  ]
+}
