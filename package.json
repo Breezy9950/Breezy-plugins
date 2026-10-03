@@ -1,0 +1,10 @@
+{
+  "name":"breezy-plugins-netlify",
+  "private":true,
+  "engines":{
+    "node":">=20"
+  },
+  "dependencies":{
+    "@netlify/blobs":"11.1.1"
+  }
+}
