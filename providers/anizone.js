@@ -39,6 +39,10 @@ var MAX_MAPPING_CACHE=300;
 var CACHE_TIMEOUT=5000;
 var MAPPING_TIMEOUT=6000;
 
+function log(message){
+  console.log(`[AniZone] ${message}`);
+}
+
 function sanitizeJson(raw){
   if(!raw)return"";
   return raw.replace(/\\u0022/g,'"').replace(/\\u0026/g,"&").replace(/\\'/g,"'").replace(/\\\//g,"/").replace(/\\\\/g,"\\").replace(/\\&/g,"&").replace(/\\'/g,"'").replace(/\\0/g,"\\u0000").replace(HEX_ESCAPE,(_,hex)=>"\\u00"+hex).replace(INVALID_BACKSLASH,"");
@@ -133,17 +137,30 @@ function getImdbId(tmdbId,mediaType){
   return __async(this,null,function*(){
     const key=`${mediaType}:${tmdbId}`;
     const cached=cacheGet(IMDB_CACHE,key);
-    if(cached)return cached;
+    if(cached){
+      log(`IMDb memory cache hit ${key} -> ${cached}`);
+      return cached;
+    }
     try{
       const type=mediaType==="tv"?"tv":"movie";
       const url=`https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+      log(`IMDb lookup TMDB=${tmdbId} type=${type}`);
       const res=yield fetchWithTimeout(url,{},5000);
-      if(!res.ok)return null;
+      if(!res.ok){
+        log(`IMDb lookup failed HTTP ${res.status}`);
+        return null;
+      }
       const data=yield res.json();
       const id=data&&data.imdb_id||null;
-      if(id)cacheSet(IMDB_CACHE,key,id);
+      if(id){
+        cacheSet(IMDB_CACHE,key,id);
+        log(`IMDb resolved ${tmdbId} -> ${id}`);
+      }else{
+        log(`IMDb ID missing for TMDB ${tmdbId}`);
+      }
       return id;
-    }catch(_){
+    }catch(e){
+      log(`IMDb lookup error: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -154,16 +171,25 @@ function getPersistentSeasonCache(imdbId,season){
     if(!imdbId)return null;
     const key=`${imdbId}:s${season}`;
     try{
+      log(`Persistent cache GET ${key}`);
       const url=`${ANIME_CACHE_URL}?key=${encodeURIComponent(key)}`;
       const res=yield fetchWithTimeout(url,{
         headers:{"Accept":"application/json"}
       },CACHE_TIMEOUT);
-      if(!res.ok)return null;
+      if(!res.ok){
+        log(`Persistent cache MISS ${key} HTTP ${res.status}`);
+        return null;
+      }
       const body=yield res.json();
-      if(!body||!body.hit||!body.data)return null;
+      if(!body||!body.hit||!body.data){
+        log(`Persistent cache MISS ${key} empty response`);
+        return null;
+      }
+      const count=body.data.episodes&&typeof body.data.episodes==="object"?Object.keys(body.data.episodes).length:0;
+      log(`Persistent cache HIT ${key} slug=${body.data.animeSlug||"?"} episodes=${count}`);
       return body.data;
     }catch(e){
-      console.log(`[AniZone] Persistent cache read failed: ${e.message}`);
+      log(`Persistent cache read failed ${key}: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -174,6 +200,8 @@ function savePersistentSeasonCache(imdbId,season,data){
     if(!imdbId||!data)return false;
     const key=`${imdbId}:s${season}`;
     try{
+      const count=data.episodes&&typeof data.episodes==="object"?Object.keys(data.episodes).length:0;
+      log(`Persistent cache POST ${key} slug=${data.animeSlug||"?"} episodes=${count}`);
       const res=yield fetchWithTimeout(ANIME_CACHE_URL,{
         method:"POST",
         headers:{
@@ -182,9 +210,14 @@ function savePersistentSeasonCache(imdbId,season,data){
         },
         body:JSON.stringify({key,data})
       },CACHE_TIMEOUT);
-      return res.ok;
+      if(res.ok){
+        log(`Persistent cache write OK ${key}`);
+        return true;
+      }
+      log(`Persistent cache write failed ${key} HTTP ${res.status}`);
+      return false;
     }catch(e){
-      console.log(`[AniZone] Persistent cache write failed: ${e.message}`);
+      log(`Persistent cache write failed ${key}: ${e&&e.message||e}`);
       return false;
     }
   });
@@ -261,22 +294,30 @@ function getAniBridgeMapping(tmdbId,season,episode){
   return __async(this,null,function*(){
     const key=`${tmdbId}:s${season}:e${episode}`;
     const cached=cacheGet(MAPPING_MEMORY_CACHE,key);
-    if(cached)return cached;
+    if(cached){
+      log(`AniBridge memory cache HIT ${key}`);
+      return cached;
+    }
     try{
       const url=`${ANIME_MAPPING_URL}?tmdbId=${encodeURIComponent(tmdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
+      log(`AniBridge lookup ${key}`);
       const res=yield fetchWithTimeout(url,{
         headers:{"Accept":"application/json"}
       },MAPPING_TIMEOUT);
       if(!res.ok){
-        console.log(`[AniZone] AniBridge lookup HTTP ${res.status}`);
+        log(`AniBridge lookup HTTP ${res.status} ${key}`);
         return null;
       }
       const body=yield res.json();
-      if(!body||!body.ok||!body.mapping)return null;
+      if(!body||!body.ok||!body.mapping){
+        log(`AniBridge lookup returned no mapping ${key}`);
+        return null;
+      }
       cacheSet(MAPPING_MEMORY_CACHE,key,body.mapping,MAX_MAPPING_CACHE);
+      log(`AniBridge lookup HIT ${key}`);
       return body.mapping;
     }catch(e){
-      console.log(`[AniZone] AniBridge lookup failed: ${e.message}`);
+      log(`AniBridge lookup failed ${key}: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -288,6 +329,7 @@ function getAniListMetadata(anilistId){
     try{
       const id=Number(anilistId);
       if(!Number.isInteger(id)||id<1)return null;
+      log(`AniList metadata lookup ${id}`);
       const query=`query($id:Int){Media(id:$id,type:ANIME){id title{romaji english native} synonyms}}`;
       const res=yield fetchWithTimeout("https://graphql.anilist.co",{
         method:"POST",
@@ -295,12 +337,12 @@ function getAniListMetadata(anilistId){
           "Accept":"application/json",
           "Content-Type":"application/json"
         },
-        body:JSON.stringify({
-          query,
-          variables:{id}
-        })
+        body:JSON.stringify({query,variables:{id}})
       },5000);
-      if(!res.ok)return null;
+      if(!res.ok){
+        log(`AniList metadata HTTP ${res.status} id=${id}`);
+        return null;
+      }
       const body=yield res.json();
       const data=body&&body.data&&body.data.Media;
       if(!data)return null;
@@ -319,7 +361,8 @@ function getAniListMetadata(anilistId){
           ...(Array.isArray(data.synonyms)?data.synonyms:[])
         ].filter(Boolean)
       };
-    }catch(_){
+    }catch(e){
+      log(`AniList metadata error: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -331,8 +374,12 @@ function getMalMetadata(malId){
     try{
       const id=Number(malId);
       if(!Number.isInteger(id)||id<1)return null;
+      log(`MAL metadata lookup ${id}`);
       const res=yield fetchWithTimeout(`https://api.jikan.moe/v4/anime/${id}`,{},5000);
-      if(!res.ok)return null;
+      if(!res.ok){
+        log(`MAL metadata HTTP ${res.status} id=${id}`);
+        return null;
+      }
       const body=yield res.json();
       const d=body&&body.data;
       if(!d)return null;
@@ -346,7 +393,8 @@ function getMalMetadata(malId){
           ...(Array.isArray(d.title_synonyms)?d.title_synonyms:[])
         ].filter(Boolean)
       };
-    }catch(_){
+    }catch(e){
+      log(`MAL metadata error: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -378,9 +426,7 @@ function normalizeAniBridgeMapping(mapping,tmdbId,season,episode,imdbId){
     anilist_id:anilistId!=null?String(anilistId):"",
     mal_episode:mappedEpisode,
     anime_title:typeof mapping.anime_title==="string"?mapping.anime_title:"",
-    titles:Array.isArray(mapping.titles)?
-      mapping.titles.filter(v=>typeof v==="string"):
-      [],
+    titles:Array.isArray(mapping.titles)?mapping.titles.filter(v=>typeof v==="string"):[],
     air_date:typeof mapping.air_date==="string"?mapping.air_date:"",
     source:mapping.source||"anibridge"
   };
@@ -388,35 +434,19 @@ function normalizeAniBridgeMapping(mapping,tmdbId,season,episode,imdbId){
 
 function resolveAniBridge(imdbId,tmdbId,season,episode){
   return __async(this,null,function*(){
-    const raw=yield getAniBridgeMapping(
-      tmdbId,
-      season,
-      episode
-    );
-
+    const raw=yield getAniBridgeMapping(tmdbId,season,episode);
     if(!raw)return null;
 
-    const mapping=normalizeAniBridgeMapping(
-      raw,
-      tmdbId,
-      season,
-      episode,
-      imdbId
-    );
+    const mapping=normalizeAniBridgeMapping(raw,tmdbId,season,episode,imdbId);
+    if(!mapping){
+      log(`AniBridge mapping normalization failed TMDB=${tmdbId} S${season}E${episode}`);
+      return null;
+    }
 
-    if(!mapping)return null;
-
-    /*
-     * The mapping endpoint is expected to return the correct
-     * AniList/MAL identity. Only fetch metadata when the
-     * mapping itself doesn't already contain a usable title.
-     */
     if(!mapping.anime_title&&!mapping.titles.length){
       let metadata=null;
-
       if(mapping.anilist_id)
         metadata=yield getAniListMetadata(mapping.anilist_id);
-
       if(!metadata&&mapping.mal_id)
         metadata=yield getMalMetadata(mapping.mal_id);
 
@@ -434,10 +464,13 @@ function resolveAniBridge(imdbId,tmdbId,season,episode){
     if(!mapping.anime_title&&mapping.titles.length)
       mapping.anime_title=mapping.titles[0];
 
-    if(!mapping.anime_title)return null;
+    if(!mapping.anime_title){
+      log(`AniBridge mapping has no usable title TMDB=${tmdbId} S${season}E${episode}`);
+      return null;
+    }
 
-    console.log(
-      `[AniZone] AniBridge mapped "${mapping.anime_title}" `+
+    log(
+      `AniBridge mapped "${mapping.anime_title}" `+
       `S${season}E${episode} -> E${mapping.mal_episode}`
     );
 
@@ -457,6 +490,8 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
     const mapId=`${imdbId}:s${season}:e${episode}`;
     let metaData=null;
 
+    log(`Legacy mapping START ${imdbId}:S${seasonNum}E${episodeNum}`);
+
     const metaUrls=[
       `https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`,
       `https://cinemeta-live.strem.io/meta/series/${imdbId}.json`
@@ -469,10 +504,13 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
           const json=yield mRes.json();
           if((_a=json==null?void 0:json.meta)==null?void 0:_a.videos){
             metaData=json.meta;
+            log(`Legacy mapping Cinemeta metadata HIT`);
             break;
           }
         }
-      }catch(_){}
+      }catch(e){
+        log(`Legacy Cinemeta error: ${e&&e.message||e}`);
+      }
     }
 
     let tmdbEpisode=null;
@@ -499,17 +537,24 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
               released:tmdbEpisode.air_date
             }]
           };
+          log(`Legacy mapping built from TMDB metadata`);
         }
-      }catch(_){}
+      }catch(e){
+        log(`Legacy TMDB metadata error: ${e&&e.message||e}`);
+      }
     }
 
-    if(!metaData||!metaData.videos)return null;
+    if(!metaData||!metaData.videos){
+      log(`Legacy mapping failed: no episode metadata`);
+      return null;
+    }
 
-    const video=metaData.videos.find(
-      v=>v.season===seasonNum&&v.episode===episodeNum
-    );
+    const video=metaData.videos.find(v=>v.season===seasonNum&&v.episode===episodeNum);
 
-    if(!video||!video.released)return null;
+    if(!video||!video.released){
+      log(`Legacy mapping failed: requested episode has no release date`);
+      return null;
+    }
 
     const airDate=video.released.split("T")[0];
     const showTitle=metaData.name||"";
@@ -535,10 +580,8 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
     for(const url of armUrls){
       try{
         const res=yield fetchWithTimeout(url,{},5000);
-
         if(res.ok){
           const data=yield res.json();
-
           if(Array.isArray(data)){
             data.forEach(e=>{
               if(e.myanimelist)
@@ -546,7 +589,9 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
             });
           }
         }
-      }catch(_){}
+      }catch(e){
+        log(`Legacy ARM error: ${e&&e.message||e}`);
+      }
     }
 
     try{
@@ -554,15 +599,10 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
         `https://api.ani.zip/mappings?themoviedb_id=${tId}`:
         `https://api.ani.zip/mappings?imdb_id=${imdbId}`;
 
-      const aniRes=yield fetchWithTimeout(
-        aniIdUrl,
-        {},
-        5000
-      );
+      const aniRes=yield fetchWithTimeout(aniIdUrl,{},5000);
 
       if(aniRes.ok){
         const aniData=yield aniRes.json();
-
         if(
           (_b=aniData==null?void 0:aniData.mappings)==null?
           void 0:
@@ -570,11 +610,15 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
         )
           malIds.push(aniData.mappings.mal_id);
       }
-    }catch(_){}
+    }catch(e){
+      log(`Legacy AniZip ID error: ${e&&e.message||e}`);
+    }
 
     malIds=[
       ...new Set(malIds)
     ].filter(Boolean).sort((a,b)=>b-a);
+
+    log(`Legacy mapping candidate MAL IDs: ${malIds.join(",")||"none"}`);
 
     for(const malId of malIds){
       try{
@@ -596,24 +640,17 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
             const aniEpisodes=Object.values(aniData.episodes)
               .map(ep=>({
                 mal_episode_number:parseInt(ep.episode,10),
-                air_date:
-                  ep.airDateUtc||
-                  ep.airDate||
-                  ep.airdate
+                air_date:ep.airDateUtc||ep.airDate||ep.airdate
               }))
               .filter(ep=>!isNaN(ep.mal_episode_number));
 
             const matches=aniEpisodes
               .filter(ep=>isDateMatch(ep.air_date,airDate))
-              .sort(
-                (a,b)=>
-                  a.mal_episode_number-
-                  b.mal_episode_number
-              );
+              .sort((a,b)=>a.mal_episode_number-b.mal_episode_number);
 
             if(matches[dayIndex]){
               const match=matches[dayIndex];
-
+              log(`Legacy AniZip mapped MAL=${malId} S${seasonNum}E${episodeNum} -> E${match.mal_episode_number}`);
               return{
                 id:mapId,
                 imdb_id:imdbId,
@@ -629,7 +666,9 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
             }
           }
         }
-      }catch(_){}
+      }catch(e){
+        log(`Legacy AniZip episode error MAL=${malId}: ${e&&e.message||e}`);
+      }
 
       try{
         const jRes=yield fetchWithTimeout(
@@ -640,15 +679,10 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
 
         if(jRes.ok){
           const jData=yield jRes.json();
-          const aired=jData&&
-            jData.data&&
-            jData.data.aired;
+          const aired=jData&&jData.data&&jData.data.aired;
 
-          if(
-            aired&&
-            aired.from&&
-            isDateMatch(aired.from,airDate)
-          ){
+          if(aired&&aired.from&&isDateMatch(aired.from,airDate)){
+            log(`Legacy Jikan mapped MAL=${malId} S${seasonNum}E${episodeNum} -> E${dayIndex+1}`);
             return{
               id:mapId,
               imdb_id:imdbId,
@@ -667,10 +701,13 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
             };
           }
         }
-      }catch(_){}
+      }catch(e){
+        log(`Legacy Jikan error MAL=${malId}: ${e&&e.message||e}`);
+      }
     }
 
     if(malIds.length===1&&seasonNum===1){
+      log(`Legacy mapping using single-MAL-ID S1 fallback MAL=${malIds[0]}`);
       return{
         id:mapId,
         imdb_id:imdbId,
@@ -685,6 +722,7 @@ function resolveLegacyMapping(imdbId,season,episode,tmdbId){
       };
     }
 
+    log(`Legacy mapping FAILED ${imdbId}:S${seasonNum}E${episodeNum}`);
     return null;
   });
 }
@@ -700,8 +738,8 @@ function resolveMapping(imdbId,season,episode,tmdbId){
 
     if(primary)return primary;
 
-    console.log(
-      `[AniZone] AniBridge unavailable/missing for `+
+    log(
+      `AniBridge unavailable/missing for `+
       `${tmdbId}:S${season}E${episode}; `+
       `using legacy fallback`
     );
@@ -724,23 +762,19 @@ function getTmdbInfo(tmdbId,mediaType,season=1){
     try{
       const type=mediaType==="tv"?"tv":"movie";
       const url=`https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+      log(`TMDB metadata GET ${type}/${tmdbId}`);
       const res=yield fetchWithTimeout(url,{},6000);
 
-      if(!res.ok)return null;
+      if(!res.ok){
+        log(`TMDB metadata HTTP ${res.status}`);
+        return null;
+      }
 
       const data=yield res.json();
 
       const info={
-        title:
-          data.name||
-          data.title||
-          data.original_name||
-          data.original_title||
-          "",
-        originalTitle:
-          data.original_name||
-          data.original_title||
-          "",
+        title:data.name||data.title||data.original_name||data.original_title||"",
+        originalTitle:data.original_name||data.original_title||"",
         seasonName:""
       };
 
@@ -756,8 +790,15 @@ function getTmdbInfo(tmdbId,mediaType,season=1){
         }catch(_){}
       }
 
+      log(
+        `TMDB metadata "${info.title}" `+
+        `original="${info.originalTitle}" `+
+        `season="${info.seasonName}"`
+      );
+
       return info;
-    }catch(_){
+    }catch(e){
+      log(`TMDB metadata error: ${e&&e.message||e}`);
       return null;
     }
   });
@@ -768,7 +809,7 @@ function getTmdbInfo(tmdbId,mediaType,season=1){
    ========================================================= */
 
 function normalize(str){
-  if(!str)return"";
+  if(typeof str!=="string")return"";
   return str.toLowerCase().replace(/[^a-z0-9]/g,"").trim();
 }
 
@@ -788,15 +829,13 @@ function parseCards(html,$){
 
           const titles=new Set;
 
-          if(item.main_title)
+          if(typeof item.main_title==="string"&&item.main_title)
             titles.add(item.main_title);
 
-          if(
-            item.title_list&&
-            typeof item.title_list==="object"
-          ){
+          if(item.title_list&&typeof item.title_list==="object"){
             Object.values(item.title_list).forEach(t=>{
-              if(t)titles.add(t);
+              if(typeof t==="string"&&t)
+                titles.add(t);
             });
           }
 
@@ -807,7 +846,9 @@ function parseCards(html,$){
           });
         }
       }
-    }catch(_){}
+    }catch(e){
+      log(`AniZone card JSON parse failed: ${e&&e.message||e}`);
+    }
   }
 
   if(cards.length===0){
@@ -825,17 +866,16 @@ function parseCards(html,$){
 
       const titles=new Set;
       const xData=$(el).attr("x-data")||"";
-      const jsonMatch=
-        xData.match(
-          /JSON\.parse\('((?:[^'\\]|\\.)*)'\)/
-        );
+      const jsonMatch=xData.match(
+        /JSON\.parse\('((?:[^'\\]|\\.)*)'\)/
+      );
 
       if(jsonMatch){
         try{
           const parsed=parseXDataJson(jsonMatch[1]);
-
           Object.values(parsed).forEach(t=>{
-            if(t)titles.add(t);
+            if(typeof t==="string"&&t)
+              titles.add(t);
           });
         }catch(_){}
       }
@@ -860,14 +900,22 @@ function searchCards(query){
       10*60*1000
     );
 
-    if(cached)return cached;
+    if(cached){
+      log(`AniZone search memory HIT "${query}" cards=${cached.length}`);
+      return cached;
+    }
+
+    log(`AniZone search "${query}"`);
 
     const searchUrl=
       `/anime?search=${encodeURIComponent(query)}&sort=title-asc`;
 
     const searchHtml=yield fetchText(searchUrl);
 
-    if(!searchHtml)return[];
+    if(!searchHtml){
+      log(`AniZone search failed/empty "${query}"`);
+      return[];
+    }
 
     const $search=
       import_cheerio_without_node_native.default.load(
@@ -877,6 +925,8 @@ function searchCards(query){
     const cards=parseCards(searchHtml,$search);
 
     cacheSet(SEARCH_CACHE,query,cards);
+
+    log(`AniZone search result "${query}" cards=${cards.length}`);
 
     return cards;
   });
@@ -932,15 +982,53 @@ function getSeasonRegexes(season){
     );
   }else{
     patterns.push(
-      new RegExp(
-        `(?:season|saison)\\s*${season}`,
-        "i"
-      ),
+      new RegExp(`(?:season|saison)\\s*${season}`,"i"),
       new RegExp(`\\b${season}\\b`)
     );
   }
 
   return{must:patterns};
+}
+
+function cardMatchesSeason(card,season,seasonRules){
+  if(season===1){
+    for(const title of card.titles){
+      if(
+        seasonRules.mustNot.some(
+          regex=>regex.test(title)
+        )
+      )
+        return false;
+    }
+    return true;
+  }
+
+  for(const title of card.titles){
+    if(
+      seasonRules.must.some(
+        regex=>regex.test(title)
+      )
+    )
+      return true;
+  }
+
+  return false;
+}
+
+function cardMatchesBase(card,normalizedBase){
+  if(!normalizedBase)return false;
+
+  for(const title of card.titles){
+    const norm=normalize(title);
+
+    if(
+      norm.includes(normalizedBase)||
+      normalizedBase.includes(norm)
+    )
+      return true;
+  }
+
+  return false;
 }
 
 function matchCard(
@@ -955,87 +1043,63 @@ function matchCard(
 
   const normalizedBase=normalize(baseTitle);
   const normalizedSeasonName=normalize(seasonName);
+  const seasonRules=getSeasonRegexes(season);
 
+  /*
+   * Season name is only accepted if the card also appears
+   * compatible with the requested season.
+   */
   if(
     normalizedSeasonName&&
     normalizedSeasonName!=="season"+season
   ){
     for(const card of cards){
+      if(!cardMatchesSeason(card,season,seasonRules))
+        continue;
+
       for(const title of card.titles){
         if(
           normalize(title).includes(
             normalizedSeasonName
           )
-        )
+        ){
+          log(`Season-name match "${seasonName}" -> ${card.slug}`);
           return card.slug;
+        }
       }
     }
   }
 
+  /*
+   * Exact target-title matches still require season compatibility.
+   * This prevents S2 from selecting an S1 card simply because
+   * both cards share the same canonical title.
+   */
   for(const target of normalizedTargets){
     for(const card of cards){
+      if(!cardMatchesSeason(card,season,seasonRules))
+        continue;
+
       for(const title of card.titles){
-        if(normalize(title)===target)
+        if(normalize(title)===target){
+          log(`Exact title match "${target}" -> ${card.slug}`);
           return card.slug;
+        }
       }
     }
   }
-
-  const seasonRules=getSeasonRegexes(season);
 
   for(const card of cards){
-    let matchesBase=false;
+    if(!cardMatchesBase(card,normalizedBase))
+      continue;
 
-    for(const title of card.titles){
-      const norm=normalize(title);
-
-      if(
-        norm.includes(normalizedBase)||
-        normalizedBase.includes(norm)
-      ){
-        matchesBase=true;
-        break;
-      }
-    }
-
-    if(!matchesBase)continue;
-
-    let seasonMatches=false;
-
-    if(season===1){
-      let hasOtherSeason=false;
-
-      for(const title of card.titles){
-        if(
-          seasonRules.mustNot.some(
-            regex=>regex.test(title)
-          )
-        ){
-          hasOtherSeason=true;
-          break;
-        }
-      }
-
-      if(!hasOtherSeason)
-        seasonMatches=true;
-    }else{
-      for(const title of card.titles){
-        if(
-          seasonRules.must.some(
-            regex=>regex.test(title)
-          )
-        ){
-          seasonMatches=true;
-          break;
-        }
-      }
-    }
-
-    if(seasonMatches)
+    if(cardMatchesSeason(card,season,seasonRules)){
+      log(`Base+season match -> ${card.slug}`);
       return card.slug;
+    }
   }
 
-  return cards[0]?cards[0].slug:null;
+  return null;
 }
 
 function matchMovieCard(cards,targetTitles){
@@ -1046,8 +1110,10 @@ function matchMovieCard(cards,targetTitles){
     for(const title of card.titles){
       const norm=normalize(title);
 
-      if(normalizedTargets.some(t=>t===norm))
+      if(normalizedTargets.some(t=>t===norm)){
+        log(`Movie exact title match -> ${card.slug}`);
         return card.slug;
+      }
     }
   }
 
@@ -1059,12 +1125,14 @@ function matchMovieCard(cards,targetTitles){
         normalizedTargets.some(
           t=>norm.includes(t)||t.includes(norm)
         )
-      )
+      ){
+        log(`Movie partial title match -> ${card.slug}`);
         return card.slug;
+      }
     }
   }
 
-  return cards[0]?cards[0].slug:null;
+  return null;
 }
 
 function searchAnimeSlug(
@@ -1073,11 +1141,17 @@ function searchAnimeSlug(
   baseTitle,
   season=1,
   seasonName="",
-  bypassCache=false
+  bypassCache=false,
+  isMovie=false
 ){
   return __async(this,null,function*(){
+    const safeTargets=
+      targetTitles.filter(
+        v=>typeof v==="string"&&v.trim()
+      );
+
     const cacheKey=
-      `${query}|${season}|${targetTitles.join("|")}`;
+      `${query}|${season}|${safeTargets.join("|")}`;
 
     if(!bypassCache){
       const cached=cacheGet(
@@ -1086,42 +1160,81 @@ function searchAnimeSlug(
         10*60*1000
       );
 
-      if(cached)return cached;
+      if(cached){
+        log(`Slug cache HIT "${query}" -> ${cached}`);
+        return cached;
+      }
+    }else{
+      log(`Fresh slug search forced for "${query}"`);
     }
 
     let cards=yield searchCards(query);
 
-    if(
-      cards.length===0&&
-      baseTitle&&
-      baseTitle!==query
-    )
-      cards=yield searchCards(baseTitle);
+    let slug=null;
 
-    if(cards.length===0){
-      for(const title of targetTitles){
-        if(!title)continue;
+    if(cards.length){
+      slug=isMovie?
+        matchMovieCard(cards,safeTargets):
+        matchCard(
+          cards,
+          safeTargets,
+          baseTitle||query,
+          season,
+          seasonName
+        );
+    }
 
+    /*
+     * Search alternate titles even when AniZone returned cards
+     * but none matched the requested season/title.
+     */
+    if(!slug){
+      for(const title of safeTargets){
         const clean=title.split(":")[0].trim();
 
-        cards=yield searchCards(clean);
+        if(
+          !clean||
+          normalize(clean)===normalize(query)
+        )
+          continue;
 
-        if(cards.length)break;
+        const altCards=yield searchCards(clean);
+
+        if(!altCards.length)
+          continue;
+
+        slug=isMovie?
+          matchMovieCard(altCards,safeTargets):
+          matchCard(
+            altCards,
+            safeTargets,
+            baseTitle||clean,
+            season,
+            seasonName
+          );
+
+        if(slug){
+          log(`Alternate title resolved "${clean}" -> ${slug}`);
+          break;
+        }
       }
     }
 
-    if(!cards.length)return null;
+    if(!slug){
+      log(`No AniZone slug match for "${query}" S${season}`);
+      return null;
+    }
 
-    const slug=matchCard(
-      cards,
-      targetTitles,
-      baseTitle||query,
-      season,
-      seasonName
+    /*
+     * Fresh searches deliberately replace the cached slug.
+     * This is important after a stale/dead slug is detected.
+     */
+    cacheSet(SLUG_CACHE,cacheKey,slug);
+
+    log(
+      `${bypassCache?"Fresh":"Normal"} slug resolved `+
+      `"${query}" -> ${slug}`
     );
-
-    if(slug&&!bypassCache)
-      cacheSet(SLUG_CACHE,cacheKey,slug);
 
     return slug;
   });
@@ -1209,12 +1322,12 @@ function parseAudioFormat(btnText){
   const hasJap=
     lower.includes("japanese")||
     lower.includes("jpn")||
-    lower.includes("ja");
+    lower.includes(" ja");
 
   const hasEng=
     lower.includes("english")||
     lower.includes("eng")||
-    lower.includes("en");
+    lower.includes(" en");
 
   if(hasEng&&hasJap)return"Dual Audio";
   if(hasEng)return"Dub";
@@ -1226,14 +1339,16 @@ function parseAudioFormat(btnText){
 
 function fetchEpisodePage(slug,episode){
   return __async(this,null,function*(){
-    const episodeUrl=
-      `/anime/${slug}/${episode}`;
+    const episodeUrl=`/anime/${slug}/${episode}`;
 
-    const response=
-      yield fetchWithCookies(episodeUrl);
+    log(`Episode GET ${episodeUrl}`);
 
-    if(!response.ok||!response.text)
+    const response=yield fetchWithCookies(episodeUrl);
+
+    if(!response.ok||!response.text){
+      log(`Episode GET failed ${episodeUrl}`);
       return null;
+    }
 
     const $=
       import_cheerio_without_node_native.default.load(
@@ -1245,6 +1360,12 @@ function fetchEpisodePage(slug,episode){
         response.text,
         $
       );
+
+    log(
+      `Episode loaded ${episodeUrl} `+
+      `master=${parsed&&parsed.masterUrl?"YES":"NO"} `+
+      `cookies=${response.cookies?"YES":"NO"}`
+    );
 
     return{
       url:episodeUrl,
@@ -1276,6 +1397,12 @@ function getStreamsFromEpisodePage(
     const serverButtons=
       ep$('button[wire\\:click*="setVideo"]');
 
+    log(
+      `Stream extraction E${mappedEp} `+
+      `servers=${serverButtons.length} `+
+      `default=${defaultStream&&defaultStream.masterUrl?"YES":"NO"}`
+    );
+
     let defaultFormat="Sub";
     let defaultServerName="AniZone";
 
@@ -1294,6 +1421,11 @@ function getStreamsFromEpisodePage(
 
       if(nameMatch)
         defaultServerName=nameMatch[1];
+
+      log(
+        `Default server "${defaultServerName}" `+
+        `format=${defaultFormat}`
+      );
     }
 
     if(defaultStream&&defaultStream.masterUrl){
@@ -1307,6 +1439,8 @@ function getStreamsFromEpisodePage(
         headers:HEADERS,
         subtitles:defaultStream.subtitles
       });
+
+      log(`Default stream extracted`);
     }
 
     if(serverButtons.length>1){
@@ -1319,37 +1453,38 @@ function getStreamsFromEpisodePage(
       const snapshot=
         snapshotEl.attr("wire:snapshot");
 
+      log(
+        `Livewire state csrf=${csrfToken?"YES":"NO"} `+
+        `snapshot=${snapshot?"YES":"NO"} `+
+        `cookies=${epResponse.cookies?"YES":"NO"}`
+      );
+
       if(csrfToken&&snapshot&&epResponse.cookies){
         for(let i=1;i<serverButtons.length;i++){
           const btn=serverButtons.eq(i);
-          const clickAttr=
-            btn.attr("wire:click")||"";
+          const clickAttr=btn.attr("wire:click")||"";
+          const vMatch=clickAttr.match(/setVideo\((\d+)\)/);
 
-          const vMatch=
-            clickAttr.match(
-              /setVideo\((\d+)\)/
-            );
+          if(!vMatch){
+            log(`Server ${i+1}: no setVideo ID`);
+            continue;
+          }
 
-          if(!vMatch)continue;
-
-          const videoId=
-            parseInt(vMatch[1],10);
+          const videoId=parseInt(vMatch[1],10);
 
           const btnText=
             btn.text()
               .replace(/\s+/g," ")
               .trim();
 
-          const sFormat=
-            parseAudioFormat(btnText);
+          const sFormat=parseAudioFormat(btnText);
+          const nameMatch=btnText.match(/^([A-Za-z0-9_-]+)/);
+          const sName=nameMatch?nameMatch[1]:`Server ${i+1}`;
 
-          const nameMatch=
-            btnText.match(/^([A-Za-z0-9_-]+)/);
-
-          const sName=
-            nameMatch?
-            nameMatch[1]:
-            `Server ${i+1}`;
+          log(
+            `Server ${i+1} "${sName}" `+
+            `videoId=${videoId} format=${sFormat}`
+          );
 
           try{
             const payload={
@@ -1376,8 +1511,7 @@ function getStreamsFromEpisodePage(
                     "X-Livewire":"",
                     "X-CSRF-TOKEN":csrfToken,
                     "Origin":MAIN_URL,
-                    "Referer":
-                      `${MAIN_URL}${episodeUrl}`,
+                    "Referer":`${MAIN_URL}${episodeUrl}`,
                     "Cookie":epResponse.cookies
                   },
                   body:JSON.stringify(payload)
@@ -1385,57 +1519,75 @@ function getStreamsFromEpisodePage(
                 8000
               );
 
-            if(postRes.ok){
-              const postData=
-                yield postRes.json();
-
-              const liveHtml=
-                postData&&
-                postData.components&&
-                postData.components[0]&&
-                postData.components[0].effects&&
-                postData.components[0].effects.html;
-
-              if(liveHtml){
-                const $live=
-                  import_cheerio_without_node_native.default.load(
-                    liveHtml
-                  );
-
-                const extraStream=
-                  parseVidstackFromHtml(
-                    liveHtml,
-                    $live
-                  );
-
-                if(
-                  extraStream&&
-                  extraStream.masterUrl&&
-                  (!defaultStream||
-                    extraStream.masterUrl!==defaultStream.masterUrl)
-                ){
-                  streams.push({
-                    name:"AniZone",
-                    title:
-                      `${animeTitle} - Episode ${mappedEp} `+
-                      `[${sName} - ${sFormat}]`,
-                    url:extraStream.masterUrl,
-                    quality:"Multi",
-                    headers:HEADERS,
-                    subtitles:
-                      extraStream.subtitles.length>0?
-                      extraStream.subtitles:
-                      defaultStream?
-                      defaultStream.subtitles:
-                      []
-                  });
-                }
-              }
+            if(!postRes.ok){
+              log(
+                `Server ${i+1} Livewire HTTP ${postRes.status}`
+              );
+              continue;
             }
-          }catch(_){}
+
+            const postData=yield postRes.json();
+
+            const liveHtml=
+              postData&&
+              postData.components&&
+              postData.components[0]&&
+              postData.components[0].effects&&
+              postData.components[0].effects.html;
+
+            if(!liveHtml){
+              log(`Server ${i+1} Livewire returned no HTML`);
+              continue;
+            }
+
+            const $live=
+              import_cheerio_without_node_native.default.load(
+                liveHtml
+              );
+
+            const extraStream=
+              parseVidstackFromHtml(
+                liveHtml,
+                $live
+              );
+
+            if(
+              extraStream&&
+              extraStream.masterUrl&&
+              (!defaultStream||
+                extraStream.masterUrl!==defaultStream.masterUrl)
+            ){
+              streams.push({
+                name:"AniZone",
+                title:
+                  `${animeTitle} - Episode ${mappedEp} `+
+                  `[${sName} - ${sFormat}]`,
+                url:extraStream.masterUrl,
+                quality:"Multi",
+                headers:HEADERS,
+                subtitles:
+                  extraStream.subtitles.length>0?
+                  extraStream.subtitles:
+                  defaultStream?
+                  defaultStream.subtitles:
+                  []
+              });
+
+              log(`Server ${i+1} stream extracted`);
+            }else{
+              log(`Server ${i+1} returned no unique stream`);
+            }
+          }catch(e){
+            log(
+              `Server ${i+1} extraction error: `+
+              `${e&&e.message||e}`
+            );
+          }
         }
       }
     }
+
+    log(`Stream extraction complete: ${streams.length} streams`);
 
     return streams;
   });
@@ -1456,9 +1608,9 @@ function getStreams(
       season=parseInt(season,10)||1;
       episode=parseInt(episode,10)||1;
 
-      console.log(
-        `[AniZone] Querying streams for TMDB: ${tmdbId}, `+
-        `Type: ${mediaType}, S${season}E${episode}`
+      log(
+        `START TMDB=${tmdbId} `+
+        `type=${mediaType} S${season}E${episode}`
       );
 
       let animeTitle="";
@@ -1474,6 +1626,10 @@ function getStreams(
 
       if(mediaType==="tv"){
         imdbId=yield getImdbId(tmdbId,"tv");
+
+        if(!imdbId){
+          log(`No IMDb ID; cannot use persistent/mapping cache`);
+        }
 
         if(imdbId){
           persistentSeason=
@@ -1491,31 +1647,35 @@ function getStreams(
             const cachedEpisode=
               persistentSeason.episodes[String(episode)];
 
-            animeSlug=
-              persistentSeason.animeSlug;
-
+            animeSlug=persistentSeason.animeSlug;
             mapping=cachedEpisode;
-
             mappedEp=
-              parseInt(
-                cachedEpisode.mal_episode,
-                10
-              )||episode;
-
-            animeTitle=
-              cachedEpisode.anime_title||"";
+              parseInt(cachedEpisode.mal_episode,10)||episode;
+            animeTitle=cachedEpisode.anime_title||"";
 
             targetTitles=
               Array.isArray(cachedEpisode.titles)?
               [...cachedEpisode.titles]:
               [];
 
-            console.log(
-              `[AniZone] Cache hit: ${animeSlug} `+
-              `S${season}E${episode}->E${mappedEp}`
+            log(
+              `PERSISTENT CACHE HIT `+
+              `${imdbId}:S${season}E${episode} `+
+              `slug=${animeSlug} `+
+              `mapped=E${mappedEp} `+
+              `title="${animeTitle}"`
+            );
+          }else{
+            log(
+              `PERSISTENT CACHE has no episode `+
+              `${imdbId}:S${season}E${episode}`
             );
           }
 
+          /*
+           * Only resolve AniBridge/legacy when the persistent
+           * cache did not already contain the requested episode.
+           */
           if(!mapping){
             mapping=
               yield resolveMapping(
@@ -1527,18 +1687,11 @@ function getStreams(
 
             if(mapping){
               mappedEp=
-                parseInt(
-                  mapping.mal_episode,
-                  10
-                )||episode;
-
-              animeTitle=
-                mapping.anime_title||"";
+                parseInt(mapping.mal_episode,10)||episode;
+              animeTitle=mapping.anime_title||"";
 
               if(Array.isArray(mapping.titles))
-                targetTitles.push(
-                  ...mapping.titles
-                );
+                targetTitles.push(...mapping.titles);
 
               targetTitles=[
                 ...new Set(
@@ -1546,46 +1699,54 @@ function getStreams(
                 )
               ];
 
-              console.log(
-                `[AniZone] Mapping resolved: `+
+              log(
+                `Mapping resolved `+
                 `"${animeTitle}" `+
                 `E${episode}->E${mappedEp} `+
-                `[${mapping.source||"unknown"}]`
+                `source=${mapping.source||"unknown"}`
               );
+            }else{
+              log(`No mapping available for TMDB=${tmdbId} S${season}E${episode}`);
             }
           }
         }
 
         /*
-         * TMDB is metadata/title fallback only.
-         * It never overrides AniBridge/legacy episode mapping.
+         * Hot-path optimization:
+         * a valid persistent-cache episode already has its title
+         * and AniZone slug, so TMDB metadata isn't needed.
          */
-        const tmdbInfo=
-          yield getTmdbInfo(
-            tmdbId,
-            "tv",
-            season
-          );
-
-        if(tmdbInfo){
-          if(!animeTitle)
-            animeTitle=tmdbInfo.title;
-
-          if(tmdbInfo.originalTitle)
-            altTitles.push(
-              tmdbInfo.originalTitle
+        if(
+          !animeSlug||
+          !animeTitle
+        ){
+          const tmdbInfo=
+            yield getTmdbInfo(
+              tmdbId,
+              "tv",
+              season
             );
 
-          seasonName=
-            tmdbInfo.seasonName||"";
+          if(tmdbInfo){
+            if(!animeTitle)
+              animeTitle=tmdbInfo.title;
 
-          if(
-            !targetTitles.length&&
-            tmdbInfo.originalTitle
-          )
-            targetTitles.push(
+            if(tmdbInfo.originalTitle)
+              altTitles.push(
+                tmdbInfo.originalTitle
+              );
+
+            seasonName=
+              tmdbInfo.seasonName||"";
+
+            if(
+              !targetTitles.length&&
               tmdbInfo.originalTitle
-            );
+            )
+              targetTitles.push(
+                tmdbInfo.originalTitle
+              );
+          }
         }
 
         targetTitles=[
@@ -1625,10 +1786,12 @@ function getStreams(
       if(!animeTitle&&targetTitles.length)
         animeTitle=targetTitles[0];
 
-      if(!animeTitle&&targetTitles.length===0)
+      if(!animeTitle&&targetTitles.length===0){
+        log(`ABORT: no usable title`);
         return[];
+      }
 
-      const baseCleanQuery=
+      const cleanedBase=
         animeTitle
           .split(":")[0]
           .replace(
@@ -1636,6 +1799,12 @@ function getStreams(
             ""
           )
           .trim();
+
+      /*
+       * Never allow the search query to become empty.
+       */
+      const baseCleanQuery=
+        cleanedBase||animeTitle.trim();
 
       const specificTargetTitles=
         season===1||mediaType==="movie"?
@@ -1649,8 +1818,16 @@ function getStreams(
           animeTitle
         ])];
 
+      log(
+        `Identity title="${animeTitle}" `+
+        `base="${baseCleanQuery}" `+
+        `targets=${specificTargetTitles.length} `+
+        `mappedEpisode=${mappedEp} `+
+        `slug=${animeSlug||"none"}`
+      );
+
       /*
-       * Cached slug = no AniZone search.
+       * Cached slug means no AniZone search.
        */
       if(!animeSlug){
         animeSlug=
@@ -1659,8 +1836,12 @@ function getStreams(
             specificTargetTitles,
             baseCleanQuery,
             season,
-            seasonName
+            seasonName,
+            false,
+            mediaType==="movie"
           );
+      }else{
+        log(`Using persistent-cache slug "${animeSlug}" without search`);
       }
 
       let episodeData=null;
@@ -1677,19 +1858,15 @@ function getStreams(
           !episodeData.parsed||
           !episodeData.parsed.masterUrl
         ){
-          console.log(
-            `[AniZone] Cached/selected slug failed `+
-            `for E${mappedEp}; forcing fresh title search`
+          log(
+            `Selected slug FAILED `+
+            `"${animeSlug}" E${mappedEp}; `+
+            `forcing fresh AniZone search`
           );
 
           animeSlug=null;
           episodeData=null;
 
-          /*
-           * bypassCache=true is important here.
-           * Otherwise SLUG_CACHE can hand us the exact same
-           * dead slug that just failed.
-           */
           const freshQueries=[
             baseCleanQuery,
             animeTitle.split(":")[0].trim(),
@@ -1704,6 +1881,8 @@ function getStreams(
           for(
             const query of [...new Set(freshQueries)]
           ){
+            log(`Fresh recovery query "${query}"`);
+
             const freshSlug=
               yield searchAnimeSlug(
                 query,
@@ -1711,10 +1890,12 @@ function getStreams(
                 query,
                 season,
                 seasonName,
-                true
+                true,
+                mediaType==="movie"
               );
 
-            if(!freshSlug)continue;
+            if(!freshSlug)
+              continue;
 
             const freshEpisodeData=
               yield fetchEpisodePage(
@@ -1729,16 +1910,40 @@ function getStreams(
             ){
               animeSlug=freshSlug;
               episodeData=freshEpisodeData;
+
+              /*
+               * Explicitly replace the original query's cached
+               * slug as well. This prevents repeated dead-slug hits.
+               */
+              const originalSlugCacheKey=
+                `${baseCleanQuery}|${season}|${specificTargetTitles.join("|")}`;
+
+              cacheSet(
+                SLUG_CACHE,
+                originalSlugCacheKey,
+                freshSlug
+              );
+
+              log(
+                `Fresh recovery SUCCESS `+
+                `slug=${freshSlug} query="${query}"`
+              );
+
               break;
             }
+
+            log(
+              `Fresh recovery slug "${freshSlug}" `+
+              `still failed E${mappedEp}`
+            );
           }
         }
       }
 
       if(!animeSlug||!episodeData){
-        console.log(
-          `[AniZone] No usable AniZone episode found `+
-          `for "${animeTitle}" E${mappedEp}`
+        log(
+          `FAIL: no usable AniZone episode `+
+          `"${animeTitle}" E${mappedEp}`
         );
         return[];
       }
@@ -1751,14 +1956,16 @@ function getStreams(
         );
 
       /*
-       * Persist stable resolution only.
-       * No m3u8 URLs, subtitles, cookies or Livewire state.
+       * IMPORTANT:
+       * Do not persist a new resolution if AniZone returned zero
+       * streams. A temporary AniZone failure must not poison cache.
        */
       if(
         mediaType==="tv"&&
         imdbId&&
         mapping&&
-        animeSlug
+        animeSlug&&
+        streams.length>0
       ){
         const cacheEpisode=
           __spreadProps(
@@ -1781,10 +1988,7 @@ function getStreams(
         if(persistentSeason){
           persistentSeason=
             __spreadProps(
-              __spreadValues(
-                {},
-                persistentSeason
-              ),
+              __spreadValues({},persistentSeason),
               {animeSlug}
             );
 
@@ -1803,6 +2007,22 @@ function getStreams(
         }
 
         cacheDirty=!!persistentSeason;
+
+        log(
+          `Persistent cache prepared `+
+          `${imdbId}:s${season} `+
+          `episode=${episode} `+
+          `slug=${animeSlug}`
+        );
+      }else if(
+        mediaType==="tv"&&
+        mapping&&
+        streams.length===0
+      ){
+        log(
+          `Persistent cache NOT updated because `+
+          `stream count=0`
+        );
       }
 
       if(cacheDirty&&persistentSeason){
@@ -1812,22 +2032,33 @@ function getStreams(
           persistentSeason
         ).then(ok=>{
           if(ok){
-            console.log(
-              `[AniZone] Persistent season cache updated `+
+            log(
+              `Persistent season cache updated `+
               `${imdbId}:s${season}`
             );
           }
-        }).catch(()=>{});
+        }).catch(e=>{
+          log(
+            `Async persistent cache write error: `+
+            `${e&&e.message||e}`
+          );
+        });
       }
 
-      console.log(
-        `[AniZone] Total streams found: ${streams.length}`
+      log(
+        `DONE TMDB=${tmdbId} `+
+        `S${season}E${episode} `+
+        `AniZoneE${mappedEp} `+
+        `slug=${animeSlug} `+
+        `streams=${streams.length}`
       );
 
       return streams;
     }catch(error){
-      console.log(
-        `[AniZone] Error: ${error&&error.message||error}`
+      log(
+        `FATAL ERROR TMDB=${tmdbId} `+
+        `S${season}E${episode}: `+
+        `${error&&error.message||error}`
       );
       return[];
     }
