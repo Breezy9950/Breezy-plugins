@@ -158,14 +158,14 @@ function getAniBridgeMapping(tmdbId,season,episode){
     if(cached)return cached;
     try{
       const url=`${ANIME_MAPPING_URL}?tmdbId=${encodeURIComponent(tmdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
+      console.log(`[AniZone] AniBridge lookup request TMDB=${tmdbId} S${season}E${episode}`);
       const res=yield fetchWithTimeout(url,{
         headers:{"Accept":"application/json"}
       },MAPPING_TIMEOUT);
-      if(!res.ok){
-        console.log(`[AniZone] AniBridge lookup HTTP ${res.status}`);
-        return null;
-      }
+      console.log(`[AniZone] AniBridge lookup HTTP ${res.status}`);
+      if(!res.ok)return null;
       const body=yield res.json();
+      console.log(`[AniZone] AniBridge lookup result ok=${!!(body&&body.ok)} mapped=${!!(body&&body.mapping)}`);
       if(!body||!body.ok||!body.mapping)return null;
       cacheSet(MAPPING_MEMORY_CACHE,key,body.mapping,MAX_MAPPING_CACHE);
       return body.mapping;
@@ -595,6 +595,15 @@ function resolveMapping(imdbId,season,episode,tmdbId){
 
     if(primary)return primary;
 
+    if(!imdbId){
+      console.log(
+        `[AniZone] AniBridge unavailable/missing for `+
+        `${tmdbId}:S${season}E${episode}; `+
+        `legacy fallback skipped because IMDb ID is unavailable`
+      );
+      return null;
+    }
+
     console.log(
       `[AniZone] AniBridge unavailable/missing for `+
       `${tmdbId}:S${season}E${episode}; `+
@@ -609,7 +618,6 @@ function resolveMapping(imdbId,season,episode,tmdbId){
     );
   });
 }
-
 /* =========================================================
    TMDB / TITLES
    ========================================================= */
@@ -1337,16 +1345,15 @@ function getStreams(
       let animeSlug=null;
 
       if(mediaType==="tv"){
-        imdbId=yield getImdbId(tmdbId,"tv");
+imdbId=yield getImdbId(tmdbId,"tv");
 
-        if(imdbId){
-          mapping=
-            yield resolveMapping(
-              imdbId,
-              season,
-              episode,
-              tmdbId
-            );
+  mapping=
+    yield resolveMapping(
+     imdbId,
+      season,
+  episode,
+   tmdbId
+ );
 
           if(mapping){
             mappedEp=
@@ -1390,8 +1397,7 @@ function getStreams(
               `E${episode}->E${mappedEp} `+
               `[${mapping.source||"unknown"}]`
             );
-          }
-        }
+          }       
 
         const tmdbInfo=
           yield getTmdbInfo(
