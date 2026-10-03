@@ -5,3 +5,8 @@
   from = "/api/anime-cache"
   to = "/.netlify/functions/anime-cache"
   status = 200
+
+[[redirects]]
+  from = "/api/anime-mapping"
+  to = "/.netlify/functions/anime-mapping"
+  status = 200
