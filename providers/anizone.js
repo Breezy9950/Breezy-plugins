@@ -27,7 +27,7 @@ var __toESM=(mod,isNodeMode,target)=>(target=mod!=null?__create(__getProtoOf(mod
 var __async=(__this,__arguments,generator)=>new Promise((resolve,reject)=>{
   var fulfilled=value=>{try{step(generator.next(value));}catch(e){reject(e);}};
   var rejected=value=>{try{step(generator.throw(value));}catch(e){reject(e);}};
-  var step=x=>x.done?resolve(x.value):Promise.resolve(x.value).then(fulfilled,rejected);
+  var step=x=>x.done?resolve(value):Promise.resolve(x.value).then(fulfilled,rejected);
   step((generator=generator.apply(__this,__arguments)).next());
 });
 
@@ -40,6 +40,9 @@ var HEADERS={
 };
 var TMDB_API_KEY="68e094699525b18a70bab2f86b1fa706";
 
+var ANIME_CACHE_URL="https://breezy-plugins.netlify.app/api/anime-cache";
+var ANIME_CACHE_SECRET=typeof process!=="undefined"&&process.env?process.env.ANIME_CACHE_SECRET||"":"";
+
 var HEX_ESCAPE=/\\x([0-9a-fA-F]{2})/g;
 var INVALID_BACKSLASH=/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g;
 
@@ -48,6 +51,7 @@ var SEASON_MAPPING_CACHE=new Map;
 var SEARCH_CACHE=new Map;
 var SLUG_CACHE=new Map;
 var IMDB_CACHE=new Map;
+var PERSISTENT_SEASON_CACHE=new Map;
 var MAX_CACHE=300;
 var SEASON_MAPPING_TTL=24*60*60*1000;
 var SEASON_MAPPING_MAX_EPISODES=50;
@@ -77,6 +81,127 @@ function seasonCacheSet(key,value){
     if(first!==void 0)SEASON_MAPPING_CACHE.delete(first);
   }
   SEASON_MAPPING_CACHE.set(key,{createdAt:Date.now(),value:value});
+}
+
+function persistentCacheKey(imdbId,season){
+  return `${imdbId}:s${parseInt(season,10)}`;
+}
+
+function persistentCacheGetLocal(key){
+  var entry=PERSISTENT_SEASON_CACHE.get(key);
+  if(!entry)return null;
+  PERSISTENT_SEASON_CACHE.delete(key);
+  PERSISTENT_SEASON_CACHE.set(key,entry);
+  return entry;
+}
+
+function persistentCacheSetLocal(key,value){
+  if(PERSISTENT_SEASON_CACHE.size>=MAX_CACHE){
+    var first=PERSISTENT_SEASON_CACHE.keys().next().value;
+    if(first!==void 0)PERSISTENT_SEASON_CACHE.delete(first);
+  }
+  PERSISTENT_SEASON_CACHE.set(key,value);
+}
+
+function getPersistentSeasonCache(key){
+  return __async(this,null,function*(){
+    var local=persistentCacheGetLocal(key);
+    if(local){
+      console.log(`[AniZone] Persistent season cache hit: ${key}`);
+      return local;
+    }
+
+    try{
+      var url=`${ANIME_CACHE_URL}?key=${encodeURIComponent(key)}`;
+      var options={headers:{"Accept":"application/json"}};
+      var response=yield fetchWithTimeout(url,options,2500);
+
+      if(!response.ok)return null;
+
+      var data=yield response.json();
+
+      if(!data||!data.hit||!data.data)return null;
+
+      persistentCacheSetLocal(key,data.data);
+
+      console.log(`[AniZone] Netlify season cache hit: ${key}`);
+
+      return data.data;
+    }catch(error){
+      console.log(`[AniZone] Netlify cache read failed: ${error&&error.message||error}`);
+      return null;
+    }
+  });
+}
+
+function savePersistentSeasonCache(key,data){
+  return __async(this,null,function*(){
+    try{
+      if(!ANIME_CACHE_URL)return;
+
+      var headers={
+        "Accept":"application/json",
+        "Content-Type":"application/json"
+      };
+
+      if(ANIME_CACHE_SECRET){
+        headers["X-Anime-Cache-Secret"]=ANIME_CACHE_SECRET;
+      }else{
+        console.log("[AniZone] Netlify cache secret unavailable; skipping persistent cache write");
+        return;
+      }
+
+      var response=yield fetchWithTimeout(ANIME_CACHE_URL,{
+        method:"POST",
+        headers,
+        body:JSON.stringify({
+          key,
+          data
+        })
+      },5000);
+
+      if(response.ok){
+        persistentCacheSetLocal(key,data);
+        console.log(`[AniZone] Netlify season cache saved: ${key}`);
+      }else{
+        console.log(`[AniZone] Netlify cache write failed: HTTP ${response.status}`);
+      }
+    }catch(error){
+      console.log(`[AniZone] Netlify cache write failed: ${error&&error.message||error}`);
+    }
+  });
+}
+
+function buildPersistentSeasonData(imdbId,season,animeSlug,currentMapping){
+  var seasonNum=parseInt(season,10);
+  var seasonKey=persistentCacheKey(imdbId,seasonNum);
+  var existing=seasonCacheGet(seasonKey);
+  var episodes={};
+
+  if(existing&&typeof existing==="object"){
+    for(var key of Object.keys(existing)){
+      var value=existing[key];
+      if(value&&typeof value==="object")episodes[key]=value;
+    }
+  }
+
+  if(currentMapping&&currentMapping.episode){
+    episodes[String(currentMapping.episode)]=currentMapping;
+  }
+
+  var limited={};
+  var keys=Object.keys(episodes).sort((a,b)=>parseInt(a,10)-parseInt(b,10));
+
+  for(var key of keys.slice(0,SEASON_MAPPING_MAX_EPISODES)){
+    limited[key]=episodes[key];
+  }
+
+  return{
+    version:1,
+    animeSlug,
+    season:seasonNum,
+    episodes:limited
+  };
 }
 
 function sanitizeJson(raw){
@@ -402,6 +527,10 @@ function resolveMapping(imdbId,season,episode,tmdbId){
       if(mapped)cacheValue[String(epNum)]=mapped;
     }
 
+    if(requestedResult&&requestedResult.episode>SEASON_MAPPING_MAX_EPISODES){
+      cacheValue[String(requestedResult.episode)]=requestedResult;
+    }
+
     if(Object.keys(cacheValue).length){
       seasonCacheSet(seasonCacheKey,cacheValue);
       console.log(`[AniZone] Season mapping cached: ${seasonCacheKey} (${Object.keys(cacheValue).length} episodes, TTL 24h)`);
@@ -527,7 +656,7 @@ function matchCard(cards,targetTitles,baseTitle,season=1,seasonName=""){
       for(var t of c.titles)if(rules.mustNot.some(r=>r.test(t))){other=true;break;}
       if(!other)seasonMatch=true;
     }else{
-      for(var t of c.titles)if(rules.must.some(r=>r.test(t))){seasonMatch=true;break;}
+      for(var t of c.titles)if(rules.must.some(r=>t.match(r))){seasonMatch=true;break;}
     }
 
     if(seasonMatch)return c.slug;
@@ -626,27 +755,6 @@ function parseAudioFormat(text){
   return"Sub";
 }
 
-function searchCards(query){
-  return __async(this,null,function*(){
-    if(!query)return[];
-    var key=query.toLowerCase();
-
-    if(SEARCH_CACHE.has(key)){
-      console.log(`[AniZone] Search cache hit: "${query}"`);
-      return SEARCH_CACHE.get(key);
-    }
-
-    var html=yield fetchText(`/anime?search=${encodeURIComponent(query)}&sort=title-asc`);
-    if(!html)return[];
-
-    var $=import_cheerio_without_node_native.default.load(html);
-    var cards=parseCards(html,$);
-
-    cacheSet(SEARCH_CACHE,key,cards);
-    return cards;
-  });
-}
-
 function onSettings(){
   return[
     {type:"header",label:"Preferences"},
@@ -673,38 +781,79 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
       var mappedEp=episode;
       var seasonName="";
       var targetTitles=[];
+      var imdbId=null;
+      var persistentSeasonKey=null;
+      var persistentSeason=null;
+      var currentMapping=null;
+      var animeSlug=null;
+      var cacheCandidate=null;
 
       if(mediaType==="tv"){
-        var imdbId=yield getImdbId(tmdbId,"tv");
+        imdbId=yield getImdbId(tmdbId,"tv");
 
         if(imdbId){
-          var mapping=yield resolveMapping(imdbId,season,episode,tmdbId);
+          persistentSeasonKey=persistentCacheKey(imdbId,season);
 
-          if(mapping){
-            mappedEp=mapping.mal_episode||episode;
-            animeTitle=mapping.anime_title||"";
-            if(mapping.titles&&Array.isArray(mapping.titles))targetTitles.push(...mapping.titles);
+          persistentSeason=yield getPersistentSeasonCache(persistentSeasonKey);
 
-            if(!animeTitle&&targetTitles.length)animeTitle=targetTitles[0];
+          if(persistentSeason&&persistentSeason.animeSlug&&persistentSeason.episodes){
+            var cachedEpisode=persistentSeason.episodes[String(parseInt(episode,10))];
 
-            console.log(`[AniZone] AnimeSync mapped: "${animeTitle}", mappedEp=${mappedEp}`);
+            if(cachedEpisode){
+              animeSlug=persistentSeason.animeSlug;
+              currentMapping=cachedEpisode;
+              mappedEp=cachedEpisode.mal_episode||episode;
+              animeTitle=cachedEpisode.anime_title||"";
+
+              if(cachedEpisode.titles&&Array.isArray(cachedEpisode.titles)){
+                targetTitles.push(...cachedEpisode.titles);
+              }
+
+              console.log(`[AniZone] Persistent cache resolved: "${animeSlug}" E${episode}->${mappedEp}`);
+            }else{
+              console.log(`[AniZone] Persistent season cache exists but E${episode} is not cached: ${persistentSeasonKey}`);
+            }
+          }
+
+          if(!currentMapping){
+            var mapping=yield resolveMapping(imdbId,season,episode,tmdbId);
+
+            if(mapping){
+              currentMapping=mapping;
+              mappedEp=mapping.mal_episode||episode;
+              animeTitle=mapping.anime_title||"";
+
+              if(mapping.titles&&Array.isArray(mapping.titles)){
+                targetTitles.push(...mapping.titles);
+              }
+
+              if(!animeTitle&&targetTitles.length)animeTitle=targetTitles[0];
+
+              console.log(`[AniZone] AnimeSync mapped: "${animeTitle}", mappedEp=${mappedEp}`);
+            }
           }
         }
 
         if(!animeTitle){
           var tmdbInfo=yield getTmdbInfo(tmdbId,mediaType,season);
+
           if(tmdbInfo){
             animeTitle=tmdbInfo.title;
+
             if(tmdbInfo.originalTitle)altTitles.push(tmdbInfo.originalTitle);
+
             seasonName=tmdbInfo.seasonName||"";
           }
         }
       }else{
         var movieInfo=yield getTmdbInfo(tmdbId,"movie");
+
         if(movieInfo){
           animeTitle=movieInfo.title;
+
           if(movieInfo.originalTitle)altTitles.push(movieInfo.originalTitle);
         }
+
         mappedEp=1;
       }
 
@@ -715,39 +864,56 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
         ?[...targetTitles,animeTitle,...altTitles]
         :[...targetTitles];
 
-      var baseQuery=animeTitle.split(":")[0]
-        .replace(/season.*|\d+nd season|\d+rd season|\d+th season|saison.*/gi,"")
-        .trim();
-
-      var slugCacheKey=`${baseQuery}|${season}|${specificTitles.join("|")}`;
-      var animeSlug=SLUG_CACHE.get(slugCacheKey);
-
-      if(animeSlug){
-        console.log(`[AniZone] Slug cache hit: "${animeSlug}"`);
+      if(mediaType==="tv"&&animeSlug){
+        console.log(`[AniZone] Persistent cache supplied slug: "${animeSlug}"`);
       }else{
-        var cards=yield searchCards(baseQuery);
+        var baseQuery=animeTitle.split(":")[0]
+          .replace(/season.*|\d+nd season|\d+rd season|\d+th season|saison.*/gi,"")
+          .trim();
 
-        if(!cards.length&&animeTitle!==baseQuery)
-          cards=yield searchCards(animeTitle.split(":")[0].trim());
+        var slugCacheKey=`${baseQuery}|${season}|${specificTitles.join("|")}`;
+        animeSlug=SLUG_CACHE.get(slugCacheKey);
 
-        if(!cards.length){
-          var altPromises=altTitles.map(t=>searchCards(t.split(":")[0].trim()));
-          var altResults=yield Promise.all(altPromises);
-          for(var result of altResults)if(result.length){cards=result;break;}
+        if(animeSlug){
+          console.log(`[AniZone] Slug cache hit: "${animeSlug}"`);
+        }else{
+          var cards=yield searchCards(baseQuery);
+
+          if(!cards.length&&animeTitle!==baseQuery)
+            cards=yield searchCards(animeTitle.split(":")[0].trim());
+
+          if(!cards.length){
+            var altPromises=altTitles.map(t=>searchCards(t.split(":")[0].trim()));
+            var altResults=yield Promise.all(altPromises);
+
+            for(var result of altResults)if(result.length){
+              cards=result;
+              break;
+            }
+          }
+
+          if(!cards.length)return[];
+
+          animeSlug=mediaType==="tv"
+            ?matchCard(cards,specificTitles,baseQuery,season,seasonName)
+            :matchMovieCard(cards,specificTitles);
+
+          if(animeSlug)cacheSet(SLUG_CACHE,slugCacheKey,animeSlug);
         }
-
-        if(!cards.length)return[];
-
-        animeSlug=mediaType==="tv"
-          ?matchCard(cards,specificTitles,baseQuery,season,seasonName)
-          :matchMovieCard(cards,specificTitles);
-
-        if(animeSlug)cacheSet(SLUG_CACHE,slugCacheKey,animeSlug);
       }
 
       if(!animeSlug)return[];
 
       console.log(`[AniZone] Selected slug: "${animeSlug}", mappedEp=${mappedEp}`);
+
+      if(mediaType==="tv"&&imdbId&&currentMapping){
+        cacheCandidate=buildPersistentSeasonData(
+          imdbId,
+          season,
+          animeSlug,
+          currentMapping
+        );
+      }
 
       var episodeUrl=`/anime/${animeSlug}/${mappedEp}`;
       var epResponse=yield fetchWithCookies(episodeUrl);
@@ -775,6 +941,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
         var text=first.text().replace(/\s+/g," ").trim();
         defaultFormat=parseAudioFormat(text);
         var nm=text.match(/^([A-Za-z0-9_-]+)/);
+
         if(nm)defaultServerName=nm[1];
       }
 
@@ -809,6 +976,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
             let btn=serverButtons.eq(i);
             let click=btn.attr("wire:click")||"";
             let match=click.match(/setVideo\((\d+)\)/);
+
             if(!match)continue;
 
             let text=btn.text().replace(/\s+/g," ").trim();
@@ -839,7 +1007,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
                     "X-Livewire":"",
                     "X-CSRF-TOKEN":csrfToken,
                     "Origin":MAIN_URL,
-                    "Referer":`${MAIN_URL}${episodeUrl}`,
+                    "X-Referer":`${MAIN_URL}${episodeUrl}`,
                     "Cookie":epResponse.cookies
                   },
                   body:JSON.stringify(payload)
@@ -849,6 +1017,7 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
 
                 var d=await r.json();
                 var html=d&&d.components&&d.components[0]&&d.components[0].effects&&d.components[0].effects.html;
+
                 if(!html)return;
 
                 var $live=import_cheerio_without_node_native.default.load(html);
@@ -867,6 +1036,20 @@ function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
       }
 
       console.log(`[AniZone] Total unique streams found: ${streams.length}`);
+
+      if(
+        streams.length&&
+        mediaType==="tv"&&
+        imdbId&&
+        persistentSeasonKey&&
+        cacheCandidate
+      ){
+        savePersistentSeasonCache(
+          persistentSeasonKey,
+          cacheCandidate
+        ).catch(()=>{});
+      }
+
       return streams;
     }catch(error){
       console.log(`[AniZone] Error: ${error&&error.message||error}`);
