@@ -44,10 +44,13 @@ var HEX_ESCAPE=/\\x([0-9a-fA-F]{2})/g;
 var INVALID_BACKSLASH=/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g;
 
 var MAPPING_CACHE=new Map;
+var SEASON_MAPPING_CACHE=new Map;
 var SEARCH_CACHE=new Map;
 var SLUG_CACHE=new Map;
 var IMDB_CACHE=new Map;
 var MAX_CACHE=300;
+var SEASON_MAPPING_TTL=24*60*60*1000;
+var SEASON_MAPPING_MAX_EPISODES=50;
 
 function cacheSet(cache,key,value){
   if(cache.size>=MAX_CACHE){
@@ -55,6 +58,25 @@ function cacheSet(cache,key,value){
     if(first!==void 0)cache.delete(first);
   }
   cache.set(key,value);
+}
+
+function seasonCacheGet(key){
+  var entry=SEASON_MAPPING_CACHE.get(key);
+  if(!entry)return null;
+  if(Date.now()-entry.createdAt>=SEASON_MAPPING_TTL){
+    SEASON_MAPPING_CACHE.delete(key);
+    console.log(`[AniZone] Season mapping cache expired: ${key}`);
+    return null;
+  }
+  return entry.value;
+}
+
+function seasonCacheSet(key,value){
+  if(SEASON_MAPPING_CACHE.size>=MAX_CACHE){
+    var first=SEASON_MAPPING_CACHE.keys().next().value;
+    if(first!==void 0)SEASON_MAPPING_CACHE.delete(first);
+  }
+  SEASON_MAPPING_CACHE.set(key,{createdAt:Date.now(),value:value});
 }
 
 function sanitizeJson(raw){
@@ -139,17 +161,51 @@ function isDateMatch(d1,d2){
   return Math.ceil(Math.abs(date1.getTime()-date2.getTime())/(1e3*60*60*24))<=2;
 }
 
+function getSeasonEpisodes(metaData,seasonNum,requestedEpisode){
+  var videos=Array.isArray(metaData&&metaData.videos)?metaData.videos:[];
+  var seasonVideos=videos.filter(v=>v&&parseInt(v.season,10)===seasonNum&&v.released);
+  seasonVideos.sort((a,b)=>parseInt(a.episode,10)-parseInt(b.episode,10));
+  var limited=seasonVideos.slice(0,SEASON_MAPPING_MAX_EPISODES);
+  if(requestedEpisode>SEASON_MAPPING_MAX_EPISODES){
+    var requested=seasonVideos.find(v=>parseInt(v.episode,10)===requestedEpisode);
+    if(requested&&!limited.some(v=>parseInt(v.episode,10)===requestedEpisode))limited.push(requested);
+  }
+  return limited;
+}
+
+function getEpisodeDayIndex(metaVideos,video,seasonNum,episodeNum){
+  if(!video||!video.released)return 0;
+  var airDate=video.released.split("T")[0];
+  return metaVideos.filter(v=>{
+    if(!v||!v.released)return false;
+    var vSeason=parseInt(v.season,10);
+    var vEpisode=parseInt(v.episode,10);
+    return v.released.split("T")[0]===airDate&&(vSeason<seasonNum||vSeason===seasonNum&&vEpisode<episodeNum);
+  }).length;
+}
+
 function resolveMapping(imdbId,season,episode,tmdbId){
   return __async(this,null,function*(){
-    var cacheKey=`${imdbId}:s${season}:e${episode}`;
-    if(MAPPING_CACHE.has(cacheKey)){
-      console.log(`[AniZone] Mapping cache hit: ${cacheKey}`);
-      return MAPPING_CACHE.get(cacheKey);
-    }
-
     var seasonNum=parseInt(season,10);
     var episodeNum=parseInt(episode,10);
-    var mapId=`${imdbId}:s${season}:e${episode}`;
+    var seasonCacheKey=`${imdbId}:s${seasonNum}`;
+
+    var cachedSeason=seasonCacheGet(seasonCacheKey);
+    if(cachedSeason){
+      var cachedMapping=cachedSeason[String(episodeNum)]||null;
+      if(cachedMapping){
+        console.log(`[AniZone] Season mapping cache hit: ${seasonCacheKey} E${episodeNum}`);
+        return cachedMapping;
+      }
+      console.log(`[AniZone] Season mapping cache hit but E${episodeNum} is not cached: ${seasonCacheKey}`);
+    }
+
+    var singleCacheKey=`${imdbId}:s${seasonNum}:e${episodeNum}`;
+    if(MAPPING_CACHE.has(singleCacheKey)){
+      console.log(`[AniZone] Mapping cache hit: ${singleCacheKey}`);
+      return MAPPING_CACHE.get(singleCacheKey);
+    }
+
     var metaData=null;
 
     try{
@@ -172,36 +228,39 @@ function resolveMapping(imdbId,season,episode,tmdbId){
 
     if(!metaData&&tmdbId){
       try{
-        var epUrl=`https://api.themoviedb.org/3/tv/${tmdbId}/season/${seasonNum}/episode/${episodeNum}?api_key=${TMDB_API_KEY}`;
-        var epRes=yield fetchWithTimeout(epUrl,{},4e3);
-        if(epRes.ok){
-          var epData=yield epRes.json();
-          if(epData&&epData.air_date){
-            var tvUrl=`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`;
-            var tvRes=yield fetchWithTimeout(tvUrl,{},4e3);
-            var tvData=tvRes.ok?yield tvRes.json():{};
-            metaData={
-              name:tvData.name||tvData.original_name,
-              moviedb_id:tmdbId,
-              videos:[{season:seasonNum,episode:episodeNum,released:epData.air_date}]
-            };
-          }
+        var tvUrl=`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`;
+        var tvRes=yield fetchWithTimeout(tvUrl,{},4e3);
+        var tvData=tvRes.ok?yield tvRes.json():{};
+        var seasonUrl=`https://api.themoviedb.org/3/tv/${tmdbId}/season/${seasonNum}?api_key=${TMDB_API_KEY}`;
+        var seasonRes=yield fetchWithTimeout(seasonUrl,{},4e3);
+
+        if(seasonRes.ok){
+          var seasonData=yield seasonRes.json();
+          var videos=(seasonData&&Array.isArray(seasonData.episodes)?seasonData.episodes:[]).map(ep=>({
+            season:seasonNum,
+            episode:ep.episode_number,
+            released:ep.air_date
+          })).filter(v=>v.released);
+
+          metaData={
+            name:tvData.name||tvData.original_name,
+            moviedb_id:tmdbId,
+            videos:videos
+          };
         }
       }catch(_){}
     }
 
     if(!metaData||!metaData.videos)return null;
 
-    var video=metaData.videos.find(v=>v.season===seasonNum&&v.episode===episodeNum);
-    if(!video||!video.released)return null;
+    var allMetaVideos=metaData.videos.filter(v=>v&&v.released);
+    var targetVideos=getSeasonEpisodes(metaData,seasonNum,episodeNum);
+    if(!targetVideos.length)return null;
 
-    var airDate=video.released.split("T")[0];
-    var showTitle=metaData.name;
-    var dayIndex=metaData.videos.filter(v=>{
-      if(!v.released)return false;
-      return v.released.split("T")[0]===airDate&&(v.season<seasonNum||v.season===seasonNum&&v.episode<episodeNum);
-    }).length;
+    var targetVideo=targetVideos.find(v=>parseInt(v.episode,10)===episodeNum);
+    if(!targetVideo)return null;
 
+    var showTitle=metaData.name||"";
     var tId=tmdbId||metaData.moviedb_id||metaData.themoviedb_id;
     var tvdbId=metaData.tvdb_id;
 
@@ -235,66 +294,93 @@ function resolveMapping(imdbId,season,episode,tmdbId){
     malIds=[...new Set(malIds)].filter(Boolean).sort((a,b)=>b-a);
     if(!malIds.length)return null;
 
+    var mappingByEpisode={};
+
     var mappingResults=yield Promise.all(malIds.map(malId=>__async(this,null,function*(){
+      var aniMapping=null;
+      var aniTitles=[];
       try{
         var r=yield fetchWithTimeout(`https://api.ani.zip/mappings?mal_id=${malId}`,{},3e3);
         if(r.ok){
           var d=yield r.json();
           if(d&&d.episodes){
-            var eps=Object.values(d.episodes).map(ep=>({
-              mal_episode_number:parseInt(ep.episode,10),
-              air_date:ep.airDateUtc||ep.airDate||ep.airdate
-            })).filter(ep=>!isNaN(ep.mal_episode_number));
+            aniMapping=d;
+            aniTitles=d.titles?Object.values(d.titles).filter(Boolean):[];
+          }
+        }
+      }catch(_){}
 
-            var matches=eps.filter(ep=>isDateMatch(ep.air_date,airDate)).sort((a,b)=>a.mal_episode_number-b.mal_episode_number);
+      if(aniMapping&&aniMapping.episodes){
+        for(var target of targetVideos){
+          var targetEp=parseInt(target.episode,10);
+          var airDate=target.released.split("T")[0];
+          var dayIndex=getEpisodeDayIndex(allMetaVideos,target,seasonNum,targetEp);
 
-            if(matches[dayIndex]){
-              var m=matches[dayIndex];
-              return{
-                id:mapId,
+          var eps=Object.values(aniMapping.episodes).map(ep=>({
+            mal_episode_number:parseInt(ep.episode,10),
+            air_date:ep.airDateUtc||ep.airDate||ep.airdate
+          })).filter(ep=>!isNaN(ep.mal_episode_number));
+
+          var matches=eps.filter(ep=>isDateMatch(ep.air_date,airDate)).sort((a,b)=>a.mal_episode_number-b.mal_episode_number);
+
+          if(matches[dayIndex]){
+            var m=matches[dayIndex];
+            if(!mappingByEpisode[String(targetEp)]){
+              mappingByEpisode[String(targetEp)]={
+                id:`${imdbId}:s${seasonNum}:e${targetEp}`,
                 imdb_id:imdbId,
                 season:seasonNum,
-                episode:episodeNum,
+                episode:targetEp,
                 mal_id:malId,
                 mal_episode:m.mal_episode_number,
                 anime_title:showTitle,
-                titles:d.titles?Object.values(d.titles).filter(Boolean):[],
+                titles:aniTitles,
                 air_date:airDate
               };
             }
           }
         }
-      }catch(_){}
+      }
 
       try{
-        var j=yield fetchWithTimeout(`https://api.jikan.moe/v4/anime/${malId}`,{},3e3);
-        if(j.ok){
-          var jd=yield j.json();
-          var aired=jd&&jd.data&&jd.data.aired&&jd.data.aired.from;
-          if(aired&&isDateMatch(aired,airDate)){
-            return{
-              id:mapId,
-              imdb_id:imdbId,
-              season:seasonNum,
-              episode:episodeNum,
-              mal_id:malId,
-              mal_episode:dayIndex+1,
-              anime_title:showTitle,
-              titles:[jd.data.title,jd.data.title_english,jd.data.title_japanese].filter(Boolean),
-              air_date:airDate
-            };
+        if(!aniMapping){
+          var j=yield fetchWithTimeout(`https://api.jikan.moe/v4/anime/${malId}`,{},3e3);
+          if(j.ok){
+            var jd=yield j.json();
+            var aired=jd&&jd.data&&jd.data.aired&&jd.data.aired.from;
+            if(aired){
+              for(var target of targetVideos){
+                var targetEp=parseInt(target.episode,10);
+                var airDate=target.released.split("T")[0];
+                var dayIndex=getEpisodeDayIndex(allMetaVideos,target,seasonNum,targetEp);
+                if(isDateMatch(aired,airDate)&&!mappingByEpisode[String(targetEp)]){
+                  mappingByEpisode[String(targetEp)]={
+                    id:`${imdbId}:s${seasonNum}:e${targetEp}`,
+                    imdb_id:imdbId,
+                    season:seasonNum,
+                    episode:targetEp,
+                    mal_id:malId,
+                    mal_episode:dayIndex+1,
+                    anime_title:showTitle,
+                    titles:[jd.data.title,jd.data.title_english,jd.data.title_japanese].filter(Boolean),
+                    air_date:airDate
+                  };
+                }
+              }
+            }
           }
         }
       }catch(_){}
 
-      return null;
+      return true;
     })));
 
-    var result=mappingResults.find(Boolean)||null;
+    var requestedResult=mappingByEpisode[String(episodeNum)]||null;
 
-    if(!result&&malIds.length===1&&seasonNum===1){
-      result={
-        id:mapId,
+    if(!requestedResult&&malIds.length===1&&seasonNum===1){
+      var fallbackAir=targetVideo.released?targetVideo.released.split("T")[0]:"";
+      requestedResult={
+        id:`${imdbId}:s${seasonNum}:e${episodeNum}`,
         imdb_id:imdbId,
         season:seasonNum,
         episode:episodeNum,
@@ -302,12 +388,31 @@ function resolveMapping(imdbId,season,episode,tmdbId){
         mal_episode:episodeNum,
         anime_title:showTitle,
         titles:[],
-        air_date:airDate
+        air_date:fallbackAir
       };
+      mappingByEpisode[String(episodeNum)]=requestedResult;
     }
 
-    if(result)cacheSet(MAPPING_CACHE,cacheKey,result);
-    return result;
+    var cacheValue={};
+    var cacheTargets=targetVideos.slice(0,SEASON_MAPPING_MAX_EPISODES);
+
+    for(var target of cacheTargets){
+      var epNum=parseInt(target.episode,10);
+      var mapped=mappingByEpisode[String(epNum)];
+      if(mapped)cacheValue[String(epNum)]=mapped;
+    }
+
+    if(Object.keys(cacheValue).length){
+      seasonCacheSet(seasonCacheKey,cacheValue);
+      console.log(`[AniZone] Season mapping cached: ${seasonCacheKey} (${Object.keys(cacheValue).length} episodes, TTL 24h)`);
+    }
+
+    if(requestedResult){
+      cacheSet(MAPPING_CACHE,singleCacheKey,requestedResult);
+      return requestedResult;
+    }
+
+    return null;
   });
 }
 
