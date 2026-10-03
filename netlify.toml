@@ -1,0 +1,7 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/api/anime-cache"
+  to = "/.netlify/functions/anime-cache"
+  status = 200
