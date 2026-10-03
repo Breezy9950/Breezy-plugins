@@ -1,472 +1,347 @@
 const{getStore}=require("@netlify/blobs");
-
 const STORE_NAME="anime-resolution-cache";
-const INDEX_KEY="_cache_index";
-const TMDB_INDEX_KEY="_tmdb_cache_index";
+const INDEX_KEY="_anime_cache_index";
+const TMDB_INDEX_KEY="_anime_tmdb_index";
 const MAX_CACHE_BYTES=20*1024*1024;
 const MAX_SEASONS=5;
 const MAX_EPISODES=300;
 const MAX_BODY_BYTES=200000;
-const VERSION=3;
+const MAX_ID_LENGTH=100;
 
-function store(){
-  return getStore({
-    name:STORE_NAME,
-    siteID:process.env.NETLIFY_SITE_ID,
-    token:process.env.NETLIFY_AUTH_TOKEN
-  });
+function log(message){console.log(`[ANIME CACHE] ${message}`);}
+function json(statusCode,body){return{statusCode,headers:{"Content-Type":"application/json","Cache-Control":"no-store","Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type"},body:JSON.stringify(body)};}
+function getStoreSafe(){return getStore({name:STORE_NAME,siteID:process.env.NETLIFY_SITE_ID,token:process.env.NETLIFY_AUTH_TOKEN});}
+function validKey(key){return typeof key==="string"&&/^mal:\d+$/.test(key)&&key.length<=MAX_ID_LENGTH;}
+function cleanString(value,max=500){return typeof value==="string"?value.slice(0,max):"";}
+function int(value){const n=Number(value);return Number.isInteger(n)?n:null;}
+
+function cleanEpisode(value,key){
+if(!value||typeof value!=="object")return null;
+const episode=int(value.episode||value.anizoneEpisode||key);
+const season=int(value.season||value.tmdbSeason);
+if(!episode||episode<1||!season||season<1)return null;
+const malEpisode=int(value.malEpisode||value.mal_episode);
+const tmdbEpisode=int(value.tmdbEpisode||value.tmdb_episode);
+return{
+id:cleanString(value.id||value.episodeLink,300),
+episode,
+anizoneEpisode:episode,
+season,
+tmdbSeason:int(value.tmdbSeason)||season,
+tmdbEpisode:tmdbEpisode&&tmdbEpisode>0?tmdbEpisode:null,
+malId:cleanString(value.malId||value.mal_id,50),
+malEpisode:malEpisode&&malEpisode>0?malEpisode:null,
+episodeLink:cleanString(value.episodeLink||value.id,300),
+animeTitle:cleanString(value.animeTitle||value.anime_title,500),
+titles:Array.isArray(value.titles)?value.titles.filter(v=>typeof v==="string").slice(0,30).map(v=>v.slice(0,300)):[],
+episodeTitle:cleanString(value.episodeTitle,500),
+thumbnail:cleanString(value.thumbnail,500),
+isFiller:value.isFiller===true,
+hasDub:value.hasDub===true,
+tvdbId:cleanString(value.tvdbId||value.tvdb_id,50),
+updatedAt:Number(value.updatedAt)||Date.now()
+};
 }
 
-function json(status,data){
-  return{
-    statusCode:status,
-    headers:{
-      "Content-Type":"application/json",
-      "Cache-Control":"no-store"
-    },
-    body:JSON.stringify(data)
-  };
+function cleanSeason(value,key){
+if(!value||typeof value!=="object")return null;
+const season=int(value.season||key);
+if(!season||season<1)return null;
+const source=value.episodes&&typeof value.episodes==="object"?value.episodes:{};
+const episodes={};
+for(const[k,v]of Object.entries(source)){
+if(Object.keys(episodes).length>=MAX_EPISODES)break;
+const ep=cleanEpisode(v,k);
+if(!ep||ep.season!==season)continue;
+episodes[String(ep.episode)]=ep;
+}
+if(!Object.keys(episodes).length)return null;
+return{
+season,
+animeSlug:cleanString(value.animeSlug,300),
+animeUrl:cleanString(value.animeUrl,500),
+episodeCount:Object.keys(episodes).length,
+episodes,
+lastUsed:Number(value.lastUsed)||Number(value.updatedAt)||Date.now(),
+updatedAt:Number(value.updatedAt)||Date.now()
+};
 }
 
-function cleanString(v,max=500){
-  return typeof v==="string"?v.slice(0,max):"";
+function cleanMapping(value,key){
+if(!value||typeof value!=="object")return null;
+const tmdbId=String(value.tmdbId||value.tmdb_id||"");
+const season=int(value.tmdbSeason||value.season);
+const episode=int(value.tmdbEpisode||value.tmdb_episode);
+const malId=String(value.malId||value.mal_id||"");
+const malEpisode=int(value.malEpisode||value.mal_episode);
+if(!/^\d+$/.test(tmdbId)||!season||season<1||!episode||episode<1||!/^\d+$/.test(malId)||!malEpisode||malEpisode<1)return null;
+return{tmdbId,tmdbSeason:season,tmdbEpisode:episode,tvdbId:cleanString(value.tvdbId||value.tvdb_id,50),malId,malEpisode,anizoneEpisode:int(value.anizoneEpisode||value.anizone_episode)||null,episodeLink:cleanString(value.episodeLink,300),animeTitle:cleanString(value.animeTitle||value.anime_title,500),titles:Array.isArray(value.titles)?value.titles.filter(v=>typeof v==="string").slice(0,30).map(v=>v.slice(0,300)):[],updatedAt:Number(value.updatedAt)||Date.now()};
 }
 
-function cleanNumber(v){
-  const n=Number(v);
-  return Number.isFinite(n)?n:null;
+function normalizeRecord(data){
+if(!data||typeof data!=="object")return null;
+const malId=String(data.malId||data.mal_id||"");
+if(!/^\d+$/.test(malId))return null;
+const sourceSeasons=data.seasons&&typeof data.seasons==="object"?data.seasons:{};
+const seasons={};
+for(const[k,v]of Object.entries(sourceSeasons)){
+const s=cleanSeason(v,k);
+if(s)seasons[String(s.season)]=s;
 }
-
-function cleanTitles(v){
-  if(!Array.isArray(v))return[];
-  return v.filter(x=>typeof x==="string").map(x=>x.slice(0,300)).slice(0,30);
+const mappings={};
+const sourceMappings=data.mappings&&typeof data.mappings==="object"?data.mappings:{};
+for(const[k,v]of Object.entries(sourceMappings)){
+const m=cleanMapping(v,k);
+if(m)mappings[`tmdb:${m.tmdbId}:s${m.tmdbSeason}:e${m.tmdbEpisode}`]=m;
 }
-
-function now(){
-  return Date.now();
-}
-
-function titleKey(malId){
-  return"mal:"+String(malId);
-}
-
-function tmdbKey(tmdbId,season,episode){
-  return"tmdb:"+String(tmdbId)+":"+String(season)+":"+String(episode);
-}
-
-function emptyIndex(){
-  return{version:1,updatedAt:now(),items:{}};
-}
-
-function emptyTmdbIndex(){
-  return{version:1,updatedAt:now(),items:{}};
-}
-
-async function readJson(st,key,fallback){
-  try{
-    const v=await st.get(key,{type:"json"});
-    return v||fallback;
-  }catch(e){
-    console.log(`[ANIME CACHE] read failed ${key}: ${e.message}`);
-    return fallback;
-  }
-}
-
-async function writeJson(st,key,value){
-  await st.setJSON(key,value);
-}
-
-function normalizeEpisode(ep,season,malId){
-  if(!ep||typeof ep!=="object")return null;
-  const episode=cleanNumber(ep.episode);
-  const episodeLink=cleanString(ep.episodeLink,2000);
-  if(!episode||episode<1||episode>100000||!episodeLink)return null;
-  return{
-    tmdbEpisode:cleanNumber(ep.tmdbEpisode)||episode,
-    malEpisode:cleanNumber(ep.malEpisode)||episode,
-    anizoneEpisode:cleanNumber(ep.anizoneEpisode)||episode,
-    episodeLink,
-    id:cleanString(ep.id,500),
-    imdb_id:cleanString(ep.imdb_id,100),
-    season:cleanNumber(ep.season)||season,
-    episode,
-    mal_id:cleanString(ep.mal_id||malId,100),
-    anime_title:cleanString(ep.anime_title,500),
-    titles:cleanTitles(ep.titles),
-    episodeTitle:cleanString(ep.episodeTitle,500),
-    thumbnail:cleanString(ep.thumbnail,2000),
-    isFiller:!!ep.isFiller,
-    hasDub:!!ep.hasDub
-  };
-}
-
-function normalizeSeason(seasonData,season,malId){
-  if(!seasonData||typeof seasonData!=="object")return null;
-  const episodes={};
-  const source=seasonData.episodes&&typeof seasonData.episodes==="object"?seasonData.episodes:{};
-  for(const k of Object.keys(source)){
-    const ep=normalizeEpisode(source[k],season,malId);
-    if(ep)episodes[String(ep.tmdbEpisode||ep.episode)]=ep;
-    if(Object.keys(episodes).length>=MAX_EPISODES)break;
-  }
-  return{
-    season,
-    tmdbSeason:cleanNumber(seasonData.tmdbSeason)||season,
-    malSeason:cleanNumber(seasonData.malSeason)||season,
-    animeSlug:cleanString(seasonData.animeSlug,500),
-    animeUrl:cleanString(seasonData.animeUrl,2000),
-    episodeCount:cleanNumber(seasonData.episodeCount)||Object.keys(episodes).length,
-    episodes,
-    createdAt:cleanNumber(seasonData.createdAt)||now(),
-    lastUsed:cleanNumber(seasonData.lastUsed)||now(),
-    updatedAt:now()
-  };
-}
-
-function normalizeRecord(input){
-  const malId=cleanString(input.malId,100);
-  if(!malId)return null;
-  const seasons={};
-  const source=input.seasons&&typeof input.seasons==="object"?input.seasons:{};
-  for(const k of Object.keys(source)){
-    const season=Number(k);
-    if(!Number.isInteger(season)||season<0||season>1000)continue;
-    const s=normalizeSeason(source[k],season,malId);
-    if(s)seasons[String(season)]=s;
-  }
-  return{
-    version:VERSION,
-    malId,
-    title:cleanString(input.title,500),
-    titles:cleanTitles(input.titles),
-    tmdbId:cleanString(input.tmdbId,100),
-    tvdbId:cleanString(input.tvdbId,100),
-    tmdbIds:Array.isArray(input.tmdbIds)?input.tmdbIds.map(x=>cleanString(x,100)).filter(Boolean).slice(0,30):[],
-    tvdbIds:Array.isArray(input.tvdbIds)?input.tvdbIds.map(x=>cleanString(x,100)).filter(Boolean).slice(0,30):[],
-    seasons,
-    createdAt:cleanNumber(input.createdAt)||now(),
-    updatedAt:now(),
-    lastUsed:now()
-  };
-}
-
-function touchSeason(record,season){
-  const s=record.seasons&&record.seasons[String(season)];
-  if(s){
-    s.lastUsed=now();
-    s.updatedAt=now();
-  }
-  record.lastUsed=now();
-  record.updatedAt=now();
+return enforceSeasonLimit({
+version:4,
+malId,
+title:cleanString(data.title,500),
+titles:Array.isArray(data.titles)?data.titles.filter(v=>typeof v==="string").slice(0,50).map(v=>v.slice(0,300)):[],
+tmdbId:cleanString(data.tmdbId,50),
+tvdbId:cleanString(data.tvdbId,50),
+seasons,
+mappings,
+updatedAt:Number(data.updatedAt)||Date.now()
+});
 }
 
 function enforceSeasonLimit(record){
-  const keys=Object.keys(record.seasons||{});
-  if(keys.length<=MAX_SEASONS)return;
-  keys.sort((a,b)=>{
-    const aa=Number(record.seasons[a].lastUsed||record.seasons[a].updatedAt||0);
-    const bb=Number(record.seasons[b].lastUsed||record.seasons[b].updatedAt||0);
-    return bb-aa;
-  });
-  const keep=keys.slice(0,MAX_SEASONS);
-  const allowed=new Set(keep);
-  for(const k of Object.keys(record.seasons)){
-    if(!allowed.has(k))delete record.seasons[k];
-  }
+const keys=Object.keys(record.seasons);
+if(keys.length<=MAX_SEASONS)return record;
+keys.sort((a,b)=>(Number(record.seasons[a].lastUsed)||0)-(Number(record.seasons[b].lastUsed)||0));
+for(const k of keys.slice(0,Math.max(0,keys.length-MAX_SEASONS)))delete record.seasons[k];
+for(const k of Object.keys(record.mappings)){
+const m=record.mappings[k];
+if(!record.seasons[String(m.tmdbSeason)])delete record.mappings[k];
+}
+return record;
 }
 
-function mergeRecord(oldRecord,newRecord){
-  if(!oldRecord)return newRecord;
-  const merged={
-    ...oldRecord,
-    ...newRecord,
-    version:VERSION,
-    malId:newRecord.malId||oldRecord.malId,
-    title:newRecord.title||oldRecord.title,
-    titles:newRecord.titles?.length?newRecord.titles:oldRecord.titles||[],
-    tmdbId:newRecord.tmdbId||oldRecord.tmdbId||"",
-    tvdbId:newRecord.tvdbId||oldRecord.tvdbId||"",
-    tmdbIds:[...(oldRecord.tmdbIds||[]),...(newRecord.tmdbIds||[])],
-    tvdbIds:[...(oldRecord.tvdbIds||[]),...(newRecord.tvdbIds||[])],
-    seasons:{...(oldRecord.seasons||{})},
-    createdAt:oldRecord.createdAt||now(),
-    updatedAt:now(),
-    lastUsed:now()
-  };
-  merged.tmdbIds=[...new Set(merged.tmdbIds.filter(Boolean))].slice(0,30);
-  merged.tvdbIds=[...new Set(merged.tvdbIds.filter(Boolean))].slice(0,30);
-  for(const k of Object.keys(newRecord.seasons||{})){
-    const oldSeason=merged.seasons[k];
-    const newSeason=newRecord.seasons[k];
-    if(!oldSeason){
-      merged.seasons[k]=newSeason;
-    }else{
-      merged.seasons[k]={
-        ...oldSeason,
-        ...newSeason,
-        episodes:{
-          ...(oldSeason.episodes||{}),
-          ...(newSeason.episodes||{})
-        },
-        lastUsed:now(),
-        updatedAt:now()
-      };
-    }
-  }
-  enforceSeasonLimit(merged);
-  return merged;
+function byteSize(value){return Buffer.byteLength(JSON.stringify(value),"utf8");}
+
+async function getIndex(store){
+try{
+const index=await store.get(INDEX_KEY,{type:"json"});
+if(index&&index.entries&&typeof index.entries==="object")return{totalBytes:Number(index.totalBytes)||0,entries:index.entries};
+}catch(e){log(`Index read failed: ${e.message}`);}
+return{totalBytes:0,entries:{}};
 }
 
-async function recordSize(st,key,record){
-  try{
-    const raw=JSON.stringify(record);
-    return Buffer.byteLength(raw,"utf8");
-  }catch(e){
-    return 0;
-  }
+async function saveIndex(store,index){await store.setJSON(INDEX_KEY,index);}
+
+async function getTmdbIndex(store){
+try{
+const index=await store.get(TMDB_INDEX_KEY,{type:"json"});
+if(index&&typeof index==="object")return index;
+}catch(e){log(`TMDB index read failed: ${e.message}`);}
+return{};
 }
 
-async function deleteRecord(st,index,tmdbIndex,malId){
-  const key=titleKey(malId);
-  const record=index.items[key];
-  if(!record)return;
-  delete index.items[key];
-  await st.delete(key);
-  for(const k of Object.keys(tmdbIndex.items||{})){
-    if(tmdbIndex.items[k]===malId)delete tmdbIndex.items[k];
-  }
+async function saveTmdbIndex(store,index){await store.setJSON(TMDB_INDEX_KEY,index);}
+
+async function rebuildTmdbIndex(store,index){
+const tmdbIndex={};
+for(const key of Object.keys(index.entries)){
+const malKey=key;
+try{
+const record=await store.get(malKey,{type:"json"});
+if(!record||!record.mappings)continue;
+for(const m of Object.values(record.mappings)){
+if(!m)continue;
+const k=`tmdb:${m.tmdbId}:s${m.tmdbSeason}:e${m.tmdbEpisode}`;
+tmdbIndex[k]=m;
+}
+}catch(e){log(`TMDB index rebuild skipped ${malKey}: ${e.message}`);}
+}
+await saveTmdbIndex(store,tmdbIndex);
+return tmdbIndex;
 }
 
-async function deleteOldestTitles(st,index,tmdbIndex,requiredBytes){
-  while(true){
-    const entries=Object.entries(index.items||{});
-    if(!entries.length)break;
-
-    let total=0;
-    for(const[,meta]of entries)total+=Number(meta.size||0);
-
-    if(total+requiredBytes<=MAX_CACHE_BYTES)break;
-
-    entries.sort((a,b)=>{
-      const aa=Number(a[1].lastUsed||0);
-      const bb=Number(b[1].lastUsed||0);
-      return aa-bb;
-    });
-
-    const victims=entries.slice(0,2);
-
-    for(const[key]of victims){
-      const malId=key.startsWith("mal:")?key.slice(4):key;
-      console.log(`[ANIME CACHE] evicting title MAL=${malId}`);
-      await deleteRecord(st,index,tmdbIndex,malId);
-    }
-  }
+async function evictUntilFits(store,index,key,newSize){
+let evicted=0;
+while(index.totalBytes+newSize>MAX_CACHE_BYTES){
+const candidates=Object.keys(index.entries).filter(k=>k!==key);
+if(!candidates.length)return false;
+candidates.sort((a,b)=>(Number(index.entries[a].lastUsed)||0)-(Number(index.entries[b].lastUsed)||0));
+const victims=candidates.slice(0,Math.min(2,candidates.length));
+for(const victim of victims){
+const size=Number(index.entries[victim].size)||0;
+try{await store.delete(victim);}catch(e){log(`Delete failed ${victim}: ${e.message}`);}
+delete index.entries[victim];
+index.totalBytes=Math.max(0,index.totalBytes-size);
+evicted++;
+log(`Evicted complete title ${victim} size=${size}B`);
+if(index.totalBytes+newSize<=MAX_CACHE_BYTES)break;
+}
+}
+if(evicted)log(`Eviction removed ${evicted} title record(s)`);
+return true;
 }
 
-function buildTmdbMappings(record){
-  const result=[];
-  const baseTmdbIds=[];
-  if(record.tmdbId)baseTmdbIds.push(record.tmdbId);
-  for(const x of record.tmdbIds||[])if(x&&!baseTmdbIds.includes(x))baseTmdbIds.push(x);
-
-  for(const tmdbId of baseTmdbIds){
-    for(const seasonKey of Object.keys(record.seasons||{})){
-      const season=record.seasons[seasonKey];
-      for(const epKey of Object.keys(season.episodes||{})){
-        const ep=season.episodes[epKey];
-        const tmdbEpisode=Number(ep.tmdbEpisode||ep.episode);
-        if(!Number.isInteger(tmdbEpisode)||tmdbEpisode<1)continue;
-        result.push({
-          key:tmdbKey(tmdbId,Number(season.tmdbSeason||seasonKey),tmdbEpisode),
-          malId:record.malId
-        });
-      }
-    }
-  }
-  return result;
+async function touch(store,key,season){
+const index=await getIndex(store);
+if(index.entries[key]){
+index.entries[key].lastUsed=Date.now();
+await saveIndex(store,index);
+}
+if(season){
+try{
+const record=await store.get(key,{type:"json"});
+if(record&&record.seasons&&record.seasons[String(season)]){
+record.seasons[String(season)].lastUsed=Date.now();
+record.updatedAt=Date.now();
+await store.setJSON(key,record);
+}
+}catch(e){log(`Season LRU update failed ${key}: ${e.message}`);}
+}
 }
 
-async function saveRecord(st,record,index,tmdbIndex){
-  enforceSeasonLimit(record);
+exports.handler=async event=>{
+const started=Date.now();
+try{
+const method=(event.httpMethod||"GET").toUpperCase();
+if(method==="OPTIONS")return json(204,{});
+if(method!=="GET"&&method!=="POST")return json(405,{ok:false,error:"Method not allowed"});
+const store=getStoreSafe();
 
-  const key=titleKey(record.malId);
-  const bytes=await recordSize(st,key,record);
+if(method==="GET"){
+const q=event.queryStringParameters||{};
+const key=q.key?String(q.key):"";
+const malId=q.mal_id?String(q.mal_id):"";
+const tmdbId=q.tmdb_id?String(q.tmdb_id):"";
+const season=int(q.season);
+const episode=int(q.episode);
 
-  if(bytes>MAX_CACHE_BYTES){
-    console.log(`[ANIME CACHE] record too large MAL=${record.malId} bytes=${bytes}`);
-    return false;
-  }
-
-  await deleteOldestTitles(st,index,tmdbIndex,bytes);
-
-  await st.setJSON(key,record);
-
-  index.items[key]={
-    malId:record.malId,
-    size:bytes,
-    lastUsed:record.lastUsed||now(),
-    updatedAt:record.updatedAt||now()
-  };
-
-  for(const mapping of buildTmdbMappings(record)){
-    tmdbIndex.items[mapping.key]=mapping.malId;
-  }
-
-  index.updatedAt=now();
-  tmdbIndex.updatedAt=now();
-
-  await writeJson(st,INDEX_KEY,index);
-  await writeJson(st,TMDB_INDEX_KEY,tmdbIndex);
-
-  console.log(`[ANIME CACHE] saved MAL=${record.malId} bytes=${bytes} seasons=${Object.keys(record.seasons||{}).join(",")}`);
-
-  return true;
+if(key){
+if(!validKey(key))return json(400,{ok:false,error:"Invalid cache key"});
+const data=await store.get(key,{type:"json"});
+if(!data)return json(404,{ok:false,hit:false});
+await touch(store,key,null);
+return json(200,{ok:true,hit:true,data});
 }
 
-async function getByMal(st,index,malId){
-  const key=titleKey(malId);
-  const record=await readJson(st,key,null);
-  if(!record)return null;
-
-  if(index.items[key]){
-    index.items[key].lastUsed=now();
-    index.updatedAt=now();
-    await writeJson(st,INDEX_KEY,index).catch(()=>{});
-  }
-
-  record.lastUsed=now();
-  return record;
+if(malId&&/^\d+$/.test(malId)){
+const key2=`mal:${malId}`;
+const data=await store.get(key2,{type:"json"});
+if(!data)return json(404,{ok:false,hit:false});
+await touch(store,key2,null);
+return json(200,{ok:true,hit:true,data});
 }
 
-async function getByTmdb(st,index,tmdbIndex,tmdbId,season,episode){
-  const key=tmdbKey(tmdbId,season,episode);
-  const malId=tmdbIndex.items&&tmdbIndex.items[key];
-  if(!malId)return null;
-
-  const record=await getByMal(st,index,malId);
-  if(!record)return null;
-
-  const seasonData=record.seasons&&record.seasons[String(season)];
-  if(!seasonData)return null;
-
-  const cachedEpisode=
-    seasonData.episodes&&(
-      seasonData.episodes[String(episode)]||
-      Object.values(seasonData.episodes).find(x=>Number(x.tmdbEpisode)===Number(episode))
-    );
-
-  if(!cachedEpisode)return null;
-
-  touchSeason(record,season);
-
-  return{
-    record,
-    season:seasonData,
-    episode:cachedEpisode
-  };
+if(/^\d+$/.test(tmdbId)&&season&&season>0&&episode&&episode>0){
+const idx=await getTmdbIndex(store);
+const idxKey=`tmdb:${tmdbId}:s${season}:e${episode}`;
+let mapping=idx[idxKey]||null;
+if(!mapping){
+const index=await getIndex(store);
+const rebuilt=await rebuildTmdbIndex(store,index);
+mapping=rebuilt[idxKey]||null;
+}
+if(!mapping)return json(404,{ok:false,hit:false});
+const record=await store.get(`mal:${mapping.malId}`,{type:"json"});
+if(record)await touch(store,`mal:${mapping.malId}`,season);
+return json(200,{ok:true,hit:true,mapping,data:record||null});
 }
 
-function validateRequest(body){
-  if(!body||typeof body!=="object")return"Invalid body";
-  if(!body.malId&&!body.tmdbId)return"malId or tmdbId required";
-  return null;
+return json(400,{ok:false,error:"Provide key, mal_id, or tmdb_id+season+episode"});
 }
 
-exports.handler=async(event)=>{
-  try{
-    const st=store();
-    const index=await readJson(st,INDEX_KEY,emptyIndex());
-    const tmdbIndex=await readJson(st,TMDB_INDEX_KEY,emptyTmdbIndex());
+const raw=event.body||"";
+if(Buffer.byteLength(raw,"utf8")>MAX_BODY_BYTES)return json(413,{ok:false,error:"Payload too large"});
 
-    if(event.httpMethod==="GET"){
-      const q=event.queryStringParameters||{};
-      const malId=cleanString(q.mal_id||q.malId,100);
-      const tmdbId=cleanString(q.tmdb_id||q.tmdbId,100);
-      const season=cleanNumber(q.season);
-      const episode=cleanNumber(q.episode);
+let body;
+try{body=JSON.parse(raw);}catch(e){return json(400,{ok:false,error:"Invalid JSON"});}
 
-      if(malId){
-        const record=await getByMal(st,index,malId);
-        if(!record)return json(200,{hit:false});
-        return json(200,{hit:true,type:"mal",data:record});
-      }
+const key=body&&body.key;
+if(!validKey(key))return json(400,{ok:false,error:"Invalid cache key"});
 
-      if(tmdbId&&season!=null&&episode!=null){
-        const result=await getByTmdb(st,index,tmdbIndex,tmdbId,season,episode);
-        if(!result)return json(200,{hit:false});
-        return json(200,{
-          hit:true,
-          type:"tmdb",
-          data:{
-            malId:result.record.malId,
-            mal_id:result.record.malId,
-            tmdbId,
-            tmdb_id:tmdbId,
-            tmdbSeason:season,
-            tmdbEpisode:episode,
-            tvdbId:result.record.tvdbId||"",
-            malEpisode:result.episode.malEpisode,
-            anizoneEpisode:result.episode.anizoneEpisode,
-            episodeLink:result.episode.episodeLink,
-            animeTitle:result.record.title,
-            titles:result.record.titles||[],
-            season:result.season
-          }
-        });
-      }
+const incoming=normalizeRecord(body&&body.data);
+if(!incoming)return json(400,{ok:false,error:"Invalid cache data"});
 
-      return json(400,{error:"mal_id or tmdb_id+season+episode required"});
-    }
+const old=await store.get(key,{type:"json"});
+let record=incoming;
 
-    if(event.httpMethod!=="POST"){
-      return json(405,{error:"Method not allowed"});
-    }
-
-    if(!event.body)return json(400,{error:"Missing body"});
-
-    if(Buffer.byteLength(event.body,"utf8")>MAX_BODY_BYTES){
-      return json(413,{error:"Request too large"});
-    }
-
-    let body;
-    try{
-      body=JSON.parse(event.body);
-    }catch(e){
-      return json(400,{error:"Invalid JSON"});
-    }
-
-    const validation=validateRequest(body);
-    if(validation)return json(400,{error:validation});
-
-    const malId=cleanString(body.malId||body.mal_id,100);
-    if(!malId)return json(400,{error:"malId required for saving"});
-
-    const key=titleKey(malId);
-    const existing=await readJson(st,key,null);
-
-    const incoming=normalizeRecord({
-      ...body,
-      malId
-    });
-
-    if(!incoming)return json(400,{error:"Invalid MAL ID"});
-
-    const record=mergeRecord(existing,incoming);
-
-    const saved=await saveRecord(st,record,index,tmdbIndex);
-
-    if(!saved){
-      return json(507,{saved:false,error:"Record exceeds cache capacity"});
-    }
-
-    return json(200,{
-      saved:true,
-      malId:record.malId,
-      seasons:Object.keys(record.seasons||{}).map(Number).sort((a,b)=>a-b),
-      seasonCount:Object.keys(record.seasons||{}).length
-    });
-  }catch(e){
-    console.error(`[ANIME CACHE] fatal: ${e.stack||e.message}`);
-    return json(500,{error:"Internal cache error"});
-  }
+if(old){
+const oldClean=normalizeRecord(old);
+if(oldClean){
+record={
+version:4,
+malId:incoming.malId,
+title:incoming.title||oldClean.title,
+titles:[...new Set([...(oldClean.titles||[]),...(incoming.titles||[])])].slice(0,50),
+tmdbId:incoming.tmdbId||oldClean.tmdbId,
+tvdbId:incoming.tvdbId||oldClean.tvdbId,
+seasons:__mergeSeasons(oldClean.seasons,incoming.seasons),
+mappings:Object.assign({},oldClean.mappings,incoming.mappings),
+updatedAt:Date.now()
 };
+record=enforceSeasonLimit(record);
+}
+}
+
+const size=byteSize(record);
+if(size>MAX_CACHE_BYTES)return json(413,{ok:false,error:"Cache entry exceeds 20 MB cache limit"});
+
+const index=await getIndex(store);
+const previousEntry=index.entries[key];
+const oldSize=old?Number(previousEntry&&previousEntry.size)||byteSize(old):0;
+const createdAt=previousEntry&&previousEntry.createdAt?Number(previousEntry.createdAt):Date.now();
+
+index.totalBytes=Math.max(0,index.totalBytes-oldSize);
+delete index.entries[key];
+
+if(!(await evictUntilFits(store,index,key,size)))return json(507,{ok:false,error:"Cache capacity reached"});
+
+await store.setJSON(key,record);
+
+index.entries[key]={size,createdAt,lastUsed:Date.now()};
+index.totalBytes+=size;
+
+await saveIndex(store,index);
+
+const tmdbIndex=await getTmdbIndex(store);
+
+for(const m of Object.values(record.mappings)){
+const mk=`tmdb:${m.tmdbId}:s${m.tmdbSeason}:e${m.tmdbEpisode}`;
+tmdbIndex[mk]=m;
+}
+
+for(const mk of Object.keys(tmdbIndex)){
+const m=tmdbIndex[mk];
+if(!m||!index.entries[`mal:${m.malId}`])delete tmdbIndex[mk];
+}
+
+await saveTmdbIndex(store,tmdbIndex);
+
+log(`POST SUCCESS MAL=${record.malId} seasons=${Object.keys(record.seasons).length} size=${size}B total=${index.totalBytes}B time=${Date.now()-started}ms`);
+
+return json(200,{ok:true,key,size,totalBytes:index.totalBytes,maxBytes:MAX_CACHE_BYTES});
+}catch(error){
+console.error("[ANIME CACHE] FATAL",error);
+return json(500,{ok:false,error:"Cache service error"});
+}
+};
+
+function __mergeSeasons(oldSeasons,newSeasons){
+const out=Object.assign({},oldSeasons||{});
+for(const[k,v]of Object.entries(newSeasons||{})){
+const old=out[k];
+if(!old){
+out[k]=v;
+continue;
+}
+out[k]={
+season:v.season||old.season,
+animeSlug:v.animeSlug||old.animeSlug,
+animeUrl:v.animeUrl||old.animeUrl,
+episodeCount:0,
+episodes:Object.assign({},old.episodes||{},v.episodes||{}),
+lastUsed:Math.max(Number(old.lastUsed)||0,Number(v.lastUsed)||0),
+updatedAt:Math.max(Number(old.updatedAt)||0,Number(v.updatedAt)||0)
+};
+out[k].episodeCount=Object.keys(out[k].episodes).length;
+}
+return out;
+}
