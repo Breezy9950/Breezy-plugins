@@ -1046,8 +1046,24 @@ function matchCard(
   const seasonRules=getSeasonRegexes(season);
 
   /*
-   * Season name is only accepted if the card also appears
-   * compatible with the requested season.
+   * CRITICAL:
+   * Exact title matches take priority over season heuristics.
+   * AniZone does not consistently put "Season 2", "II", etc.
+   * in every valid season's searchable title.
+   */
+  for(const target of normalizedTargets){
+    for(const card of cards){
+      for(const title of card.titles){
+        if(normalize(title)===target){
+          log(`Exact title match "${target}" -> ${card.slug}`);
+          return card.slug;
+        }
+      }
+    }
+  }
+
+  /*
+   * Season name is useful when exact title matching failed.
    */
   if(
     normalizedSeasonName&&
@@ -1071,30 +1087,25 @@ function matchCard(
   }
 
   /*
-   * Exact target-title matches still require season compatibility.
-   * This prevents S2 from selecting an S1 card simply because
-   * both cards share the same canonical title.
+   * Only use season heuristics for non-exact/base matches.
    */
-  for(const target of normalizedTargets){
-    for(const card of cards){
-      if(!cardMatchesSeason(card,season,seasonRules))
-        continue;
-
-      for(const title of card.titles){
-        if(normalize(title)===target){
-          log(`Exact title match "${target}" -> ${card.slug}`);
-          return card.slug;
-        }
-      }
-    }
-  }
-
   for(const card of cards){
     if(!cardMatchesBase(card,normalizedBase))
       continue;
 
     if(cardMatchesSeason(card,season,seasonRules)){
       log(`Base+season match -> ${card.slug}`);
+      return card.slug;
+    }
+  }
+
+  /*
+   * Last-resort base match. This preserves the behavior that
+   * allowed AniZone titles without explicit season markers to work.
+   */
+  for(const card of cards){
+    if(cardMatchesBase(card,normalizedBase)){
+      log(`Base fallback match -> ${card.slug}`);
       return card.slug;
     }
   }
@@ -1169,7 +1180,6 @@ function searchAnimeSlug(
     }
 
     let cards=yield searchCards(query);
-
     let slug=null;
 
     if(cards.length){
@@ -1185,8 +1195,8 @@ function searchAnimeSlug(
     }
 
     /*
-     * Search alternate titles even when AniZone returned cards
-     * but none matched the requested season/title.
+     * Alternate titles are only attempted when the normal search
+     * produced no usable match.
      */
     if(!slug){
       for(const title of safeTargets){
@@ -1208,7 +1218,7 @@ function searchAnimeSlug(
           matchCard(
             altCards,
             safeTargets,
-            baseTitle||clean,
+            clean,
             season,
             seasonName
           );
@@ -1225,11 +1235,11 @@ function searchAnimeSlug(
       return null;
     }
 
-    /*
-     * Fresh searches deliberately replace the cached slug.
-     * This is important after a stale/dead slug is detected.
-     */
-    cacheSet(SLUG_CACHE,cacheKey,slug);
+    cacheSet(
+      SLUG_CACHE,
+      cacheKey,
+      slug
+    );
 
     log(
       `${bypassCache?"Fresh":"Normal"} slug resolved `+
@@ -1672,10 +1682,6 @@ function getStreams(
             );
           }
 
-          /*
-           * Only resolve AniBridge/legacy when the persistent
-           * cache did not already contain the requested episode.
-           */
           if(!mapping){
             mapping=
               yield resolveMapping(
@@ -1711,11 +1717,6 @@ function getStreams(
           }
         }
 
-        /*
-         * Hot-path optimization:
-         * a valid persistent-cache episode already has its title
-         * and AniZone slug, so TMDB metadata isn't needed.
-         */
         if(
           !animeSlug||
           !animeTitle
@@ -1800,9 +1801,6 @@ function getStreams(
           )
           .trim();
 
-      /*
-       * Never allow the search query to become empty.
-       */
       const baseCleanQuery=
         cleanedBase||animeTitle.trim();
 
@@ -1826,9 +1824,6 @@ function getStreams(
         `slug=${animeSlug||"none"}`
       );
 
-      /*
-       * Cached slug means no AniZone search.
-       */
       if(!animeSlug){
         animeSlug=
           yield searchAnimeSlug(
@@ -1911,10 +1906,6 @@ function getStreams(
               animeSlug=freshSlug;
               episodeData=freshEpisodeData;
 
-              /*
-               * Explicitly replace the original query's cached
-               * slug as well. This prevents repeated dead-slug hits.
-               */
               const originalSlugCacheKey=
                 `${baseCleanQuery}|${season}|${specificTargetTitles.join("|")}`;
 
@@ -1955,11 +1946,6 @@ function getStreams(
           episodeData
         );
 
-      /*
-       * IMPORTANT:
-       * Do not persist a new resolution if AniZone returned zero
-       * streams. A temporary AniZone failure must not poison cache.
-       */
       if(
         mediaType==="tv"&&
         imdbId&&
