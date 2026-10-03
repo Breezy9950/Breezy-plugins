@@ -1,16 +1,20 @@
-const { getStore } = require("@netlify/blobs");
+const{getStore}=require("@netlify/blobs");
 
-const STORE_NAME = "anime-resolution-cache";
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_EPISODES = 50;
-const MAX_BODY_BYTES = 100000;
+const STORE_NAME="anime-resolution-cache";
+const INDEX_KEY="_cache_index";
+const MAX_CACHE_BYTES=5*1024*1024;
+const MAX_EPISODES=50;
+const MAX_BODY_BYTES=100000;
 
 function json(statusCode,body){
   return{
     statusCode,
     headers:{
       "Content-Type":"application/json",
-      "Cache-Control":"no-store"
+      "Cache-Control":"no-store",
+      "Access-Control-Allow-Origin":"*",
+      "Access-Control-Allow-Methods":"GET,POST,OPTIONS",
+      "Access-Control-Allow-Headers":"Content-Type"
     },
     body:JSON.stringify(body)
   };
@@ -53,31 +57,29 @@ function cleanEpisode(value){
 function cleanValue(value){
   if(!value||typeof value!=="object")return null;
 
-  const animeSlug=cleanString(value.animeSlug,200);
-
-  if(!animeSlug||!/^[A-Za-z0-9._~%-]+$/.test(animeSlug))return null;
-
+  const animeSlug=cleanString(value.animeSlug,300);
   const season=parseInt(value.season,10);
 
-  if(!Number.isFinite(season)||season<1)return null;
+  if(!animeSlug||!Number.isFinite(season)||season<1)return null;
 
   const sourceEpisodes=value.episodes;
+
   if(!sourceEpisodes||typeof sourceEpisodes!=="object")return null;
 
   const episodes={};
-  let count=0;
 
-  for(const [key,raw] of Object.entries(sourceEpisodes)){
-    if(count>=MAX_EPISODES)break;
+  for(const[key,raw]of Object.entries(sourceEpisodes)){
+    if(Object.keys(episodes).length>=MAX_EPISODES)break;
 
     const episode=cleanEpisode(raw);
+
     if(!episode)continue;
 
     const epNum=parseInt(key,10);
+
     if(!Number.isFinite(epNum)||epNum!==episode.episode)continue;
 
     episodes[String(epNum)]=episode;
-    count++;
   }
 
   if(!Object.keys(episodes).length)return null;
@@ -86,27 +88,63 @@ function cleanValue(value){
     version:1,
     animeSlug,
     season,
-    episodes,
-    createdAt:Date.now()
+    episodes
   };
 }
 
-function getSecret(event){
-  const headers=event&&event.headers||{};
-  return headers["x-anime-cache-secret"]||
-    headers["X-Anime-Cache-Secret"]||
-    "";
+function byteSize(value){
+  return Buffer.byteLength(JSON.stringify(value),"utf8");
 }
 
-function authorized(event){
-  const secret=process.env.ANIME_CACHE_SECRET;
+async function getIndex(store){
+  try{
+    const index=await store.get(INDEX_KEY,{type:"json"});
 
-  if(!secret)return false;
+    if(index&&typeof index==="object"&&index.entries&&typeof index.entries==="object"){
+      return{
+        totalBytes:Number(index.totalBytes)||0,
+        entries:index.entries
+      };
+    }
+  }catch(_){}
 
-  return getSecret(event)===secret;
+  return{
+    totalBytes:0,
+    entries:{}
+  };
 }
 
-exports.handler=async(event)=>{
+async function saveIndex(store,index){
+  await store.setJSON(INDEX_KEY,index);
+}
+
+async function removeUntilFits(store,index,key,newSize){
+  while(index.totalBytes+newSize>MAX_CACHE_BYTES){
+    const candidates=Object.keys(index.entries).filter(k=>k!==key);
+
+    if(!candidates.length)return false;
+
+    candidates.sort((a,b)=>{
+      const aTime=Number(index.entries[a]&&index.entries[a].lastUsed)||0;
+      const bTime=Number(index.entries[b]&&index.entries[b].lastUsed)||0;
+      return aTime-bTime;
+    });
+
+    const oldest=candidates[0];
+    const oldSize=Number(index.entries[oldest]&&index.entries[oldest].size)||0;
+
+    try{
+      await store.delete(oldest);
+    }catch(_){}
+
+    delete index.entries[oldest];
+    index.totalBytes=Math.max(0,index.totalBytes-oldSize);
+  }
+
+  return true;
+}
+
+exports.handler=async event=>{
   try{
     const method=(event.httpMethod||"GET").toUpperCase();
 
@@ -115,8 +153,8 @@ exports.handler=async(event)=>{
         statusCode:204,
         headers:{
           "Access-Control-Allow-Origin":"*",
-          "Access-Control-Allow-Methods":"GET,POST,DELETE,OPTIONS",
-          "Access-Control-Allow-Headers":"Content-Type,X-Anime-Cache-Secret"
+          "Access-Control-Allow-Methods":"GET,POST,OPTIONS",
+          "Access-Control-Allow-Headers":"Content-Type"
         },
         body:""
       };
@@ -129,7 +167,11 @@ exports.handler=async(event)=>{
     if(method==="GET"){
       const key=event.queryStringParameters&&event.queryStringParameters.key;
 
-      if(!validKey(key))return json(400,{error:"Invalid cache key"});
+      if(!validKey(key)){
+        return json(400,{
+          error:"Invalid cache key"
+        });
+      }
 
       const cached=await store.get(key,{type:"json"});
 
@@ -139,15 +181,11 @@ exports.handler=async(event)=>{
         });
       }
 
-      if(!cached.createdAt||Date.now()-cached.createdAt>=CACHE_TTL_MS){
-        try{
-          await store.delete(key);
-        }catch(_){}
+      const index=await getIndex(store);
 
-        return json(404,{
-          hit:false,
-          expired:true
-        });
+      if(index.entries[key]){
+        index.entries[key].lastUsed=Date.now();
+        saveIndex(store,index).catch(()=>{});
       }
 
       return json(200,{
@@ -157,12 +195,6 @@ exports.handler=async(event)=>{
     }
 
     if(method==="POST"){
-      if(!authorized(event)){
-        return json(401,{
-          error:"Unauthorized"
-        });
-      }
-
       const rawBody=event.body||"";
 
       if(Buffer.byteLength(rawBody,"utf8")>MAX_BODY_BYTES){
@@ -196,37 +228,58 @@ exports.handler=async(event)=>{
         });
       }
 
-      await store.setJSON(key,value,{
-        expiration:Math.floor((Date.now()+CACHE_TTL_MS)/1000)
-      });
+      const size=byteSize(value);
+
+      if(size>MAX_CACHE_BYTES){
+        return json(413,{
+          error:"Cache entry exceeds 5 MB cache limit"
+        });
+      }
+
+      const index=await getIndex(store);
+      const previous=index.entries[key];
+
+      if(previous){
+        index.totalBytes=Math.max(
+          0,
+          index.totalBytes-(Number(previous.size)||0)
+        );
+        delete index.entries[key];
+      }
+
+      const fits=await removeUntilFits(
+        store,
+        index,
+        key,
+        size
+      );
+
+      if(!fits){
+        return json(507,{
+          error:"Cache capacity reached"
+        });
+      }
+
+      await store.setJSON(key,value);
+
+      index.entries[key]={
+        size,
+        createdAt:previous
+          ?Number(previous.createdAt)||Date.now()
+          :Date.now(),
+        lastUsed:Date.now()
+      };
+
+      index.totalBytes+=size;
+
+      await saveIndex(store,index);
 
       return json(200,{
         ok:true,
         key,
-        expiresIn:CACHE_TTL_MS
-      });
-    }
-
-    if(method==="DELETE"){
-      if(!authorized(event)){
-        return json(401,{
-          error:"Unauthorized"
-        });
-      }
-
-      const key=event.queryStringParameters&&event.queryStringParameters.key;
-
-      if(!validKey(key)){
-        return json(400,{
-          error:"Invalid cache key"
-        });
-      }
-
-      await store.delete(key);
-
-      return json(200,{
-        ok:true,
-        deleted:key
+        size,
+        totalBytes:index.totalBytes,
+        maxBytes:MAX_CACHE_BYTES
       });
     }
 
