@@ -30,12 +30,10 @@ var MAPPING_MEMORY_CACHE=new Map;
 var SEARCH_CACHE=new Map;
 var SLUG_CACHE=new Map;
 var IMDB_CACHE=new Map;
-var ANIME_CACHE_MEMORY=new Map;
 var MAX_CACHE=300;
 var MAX_MAPPING_CACHE=300;
-var MAX_ANIME_CACHE_MEMORY=300;
 var MAPPING_TIMEOUT=6000;
-var ANIME_CACHE_TIMEOUT=4000;
+var ANIME_CACHE_TIMEOUT=3500;
 
 function sanitizeJson(raw){
 if(!raw)return"";
@@ -147,94 +145,6 @@ return null;
 });
 }
 
-function getAnimeCacheByTmdb(tmdbId,season,episode){
-return __async(this,null,function*(){
-const key=`tmdb:${tmdbId}:s${season}:e${episode}`;
-const memory=cacheGet(ANIME_CACHE_MEMORY,key,10*60*1000);
-if(memory)return memory;
-try{
-const url=`${ANIME_CACHE_URL}?tmdb_id=${encodeURIComponent(tmdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
-const res=yield fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ANIME_CACHE_TIMEOUT);
-if(!res.ok)return null;
-const body=yield res.json();
-if(!body||!body.hit||!body.data)return null;
-cacheSet(ANIME_CACHE_MEMORY,key,body.data,MAX_ANIME_CACHE_MEMORY);
-console.log(`[AniZone] Persistent cache HIT TMDB=${tmdbId} S${season}E${episode} MAL=${body.data.malId||body.data.mal_id} AniZoneE=${body.data.anizoneEpisode||"?"}`);
-return body.data;
-}catch(e){
-console.log(`[AniZone] Persistent cache lookup failed: ${e.message}`);
-return null;
-}
-});
-}
-
-function getAnimeCacheByMal(malId){
-return __async(this,null,function*(){
-if(!malId)return null;
-const key=`mal:${malId}`;
-const memory=cacheGet(ANIME_CACHE_MEMORY,key,10*60*1000);
-if(memory)return memory;
-try{
-const url=`${ANIME_CACHE_URL}?mal_id=${encodeURIComponent(malId)}`;
-const res=yield fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ANIME_CACHE_TIMEOUT);
-if(!res.ok)return null;
-const body=yield res.json();
-if(!body||!body.hit||!body.data)return null;
-cacheSet(ANIME_CACHE_MEMORY,key,body.data,MAX_ANIME_CACHE_MEMORY);
-return body.data;
-}catch(e){
-console.log(`[AniZone] Persistent MAL cache lookup failed: ${e.message}`);
-return null;
-}
-});
-}
-
-function saveAnimeCache(record){
-return __async(this,null,function*(){
-if(!record||!record.malId)return false;
-try{
-const res=yield fetchWithTimeout(ANIME_CACHE_URL,{
-method:"POST",
-headers:{
-"Content-Type":"application/json",
-"Accept":"application/json"
-},
-body:JSON.stringify(record)
-},ANIME_CACHE_TIMEOUT);
-if(!res.ok){
-console.log(`[AniZone] Persistent cache save HTTP ${res.status}`);
-return false;
-}
-const body=yield res.json().catch(()=>({}));
-if(!body||body.saved!==true){
-console.log(`[AniZone] Persistent cache save rejected`);
-return false;
-}
-console.log(`[AniZone] Persistent cache saved MAL=${record.malId} S${record.season||"?"}`);
-if(record.tmdbId&&record.season&&record.episode){
-cacheSet(ANIME_CACHE_MEMORY,`tmdb:${record.tmdbId}:s${record.season}:e${record.episode}`,{
-malId:record.malId,
-mal_id:record.malId,
-tmdbId:String(record.tmdbId),
-tmdb_id:String(record.tmdbId),
-tmdbSeason:Number(record.season),
-tmdbEpisode:Number(record.episode),
-tvdbId:record.tvdbId||"",
-malEpisode:record.episodeData&&record.episodeData.malEpisode||record.malEpisode,
-anizoneEpisode:record.episodeData&&record.episodeData.anizoneEpisode||record.anizoneEpisode,
-episodeLink:record.episodeData&&record.episodeData.episodeLink||record.episodeLink,
-animeTitle:record.title||"",
-titles:record.titles||[]
-},MAX_ANIME_CACHE_MEMORY);
-}
-return true;
-}catch(e){
-console.log(`[AniZone] Persistent cache save failed: ${e.message}`);
-return false;
-}
-});
-}
-
 function getShinkroMapping(tmdbId,season,episode){
 return __async(this,null,function*(){
 const key=`${tmdbId}:s${season}:e${episode}`;
@@ -277,7 +187,8 @@ mal_episode:mappedEpisode,
 anime_title:typeof mapping.anime_title==="string"?mapping.anime_title:"",
 titles:Array.isArray(mapping.titles)?mapping.titles.filter(v=>typeof v==="string"):[],
 air_date:typeof mapping.air_date==="string"?mapping.air_date:"",
-source:"shinkro"
+source:"shinkro",
+tvdb_id:mapping.tvdb_id||""
 };
 }
 
@@ -744,14 +655,7 @@ continue;
 const title=item.title_list&&item.title_list["1"]||"";
 const epImg=item.snapshot?String(item.snapshot).replace(/\\/g,""):null;
 const isFiller=String(item.type||"").toLowerCase()==="filler";
-epList.push({
-episodeLink:String(epLink).replace(/\\/g,""),
-episodeNumber:i,
-thumbnail:epImg,
-episodeTitle:title,
-isFiller,
-hasDub:false
-});
+epList.push({episodeLink:String(epLink).replace(/\\/g,""),episodeNumber:i,thumbnail:epImg,episodeTitle:title,isFiller,hasDub:false});
 i++;
 }
 console.log(`[AniZone] AnimeStream episode list found ${epList.length} episodes`);
@@ -791,26 +695,7 @@ const firstSub=subs.length?subs[0]:null;
 const firstSubUrl=firstSub&&firstSub.file?String(firstSub.file).replace(/\\/g,""):"";
 const subtitleFormat=firstSub&&firstSub.format?firstSub.format:"";
 const srcName=$("button.flex.gap-2.relative").first().text().trim()||"Default";
-return{
-url:episodeLink,
-response,
-html:response.text,
-$,
-parsed:{
-masterUrl:src,
-subtitles:subtitleList.map(s=>({
-url:s&&s.file?String(s.file).replace(/\\/g,""):"",
-name:s&&s.title||s&&s.language||"English",
-language:s&&s.language||"en",
-format:s&&s.format||"",
-default:s&&s.default===true
-})).filter(s=>s.url),
-defaultSubtitle:firstSubUrl,
-subtitleFormat,
-serverName:srcName,
-streamData
-}
-};
+return{url:episodeLink,response,html:response.text,$,parsed:{masterUrl:src,subtitles:subtitleList.map(s=>({url:s&&s.file?String(s.file).replace(/\\/g,""):"",name:s&&s.title||s&&s.language||"English",language:s&&s.language||"en",format:s&&s.format||"",default:s&&s.default===true})).filter(s=>s.url),defaultSubtitle:firstSubUrl,subtitleFormat,serverName:srcName,streamData}};
 }catch(e){
 console.log(`[AniZone] Stream extraction failed: ${e.message}`);
 return null;
@@ -821,93 +706,143 @@ return null;
 function getStreamsFromEpisodePage(animeTitle,mappedEp,episodeData){
 return __async(this,null,function*(){
 if(!episodeData||!episodeData.parsed||!episodeData.parsed.masterUrl)return[];
-return[{
-name:"AniZone",
-title:`${animeTitle} - Episode ${mappedEp} [${episodeData.parsed.serverName||"Default"}]`,
-url:episodeData.parsed.masterUrl,
-quality:"multi-quality",
-headers:HEADERS,
-subtitles:episodeData.parsed.subtitles,
-subtitle:episodeData.parsed.defaultSubtitle||"",
-subtitleFormat:episodeData.parsed.subtitleFormat||"",
-backup:false
-}];
+return[{name:"AniZone",title:`${animeTitle} - Episode ${mappedEp} [${episodeData.parsed.serverName||"Default"}]`,url:episodeData.parsed.masterUrl,quality:"multi-quality",headers:HEADERS,subtitles:episodeData.parsed.subtitles,subtitle:episodeData.parsed.defaultSubtitle||"",subtitleFormat:episodeData.parsed.subtitleFormat||"",backup:false}];
 });
 }
 
-function buildCacheEpisode(tmdbId,season,tmdbEpisode,malEpisode,anizoneEpisode,episodeData,selectedEpisode,animeTitle,targetTitles,card,mapping){
-if(!episodeData||!episodeData.parsed||!episodeData.parsed.masterUrl)return null;
-if(!selectedEpisode||!selectedEpisode.episodeLink)return null;
-if(!mapping||!mapping.mal_id)return null;
+function getAnimeCacheByTmdb(tmdbId,season,episode){
+return __async(this,null,function*(){
+try{
+const url=`${ANIME_CACHE_URL}?tmdb_id=${encodeURIComponent(tmdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
+const res=yield fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ANIME_CACHE_TIMEOUT);
+if(!res.ok)return null;
+const body=yield res.json();
+if(!body||!body.hit||!body.mapping)return null;
+return{mapping:body.mapping,data:body.data||null};
+}catch(e){
+console.log(`[AniZone] Anime cache TMDB lookup failed: ${e.message}`);
+return null;
+}
+});
+}
+
+function getAnimeCacheByMal(malId){
+return __async(this,null,function*(){
+if(!malId)return null;
+try{
+const url=`${ANIME_CACHE_URL}?mal_id=${encodeURIComponent(malId)}`;
+const res=yield fetchWithTimeout(url,{headers:{"Accept":"application/json"}},ANIME_CACHE_TIMEOUT);
+if(!res.ok)return null;
+const body=yield res.json();
+if(!body||!body.hit||!body.data)return null;
+return body.data;
+}catch(e){
+console.log(`[AniZone] Anime cache MAL lookup failed: ${e.message}`);
+return null;
+}
+});
+}
+
+function normalizeCachedMapping(raw,tmdbId,season,episode){
+if(!raw||typeof raw!=="object"||!raw.malId&&!raw.mal_id)return null;
+const malId=String(raw.malId||raw.mal_id);
+const malEpisode=parseInt(raw.malEpisode||raw.mal_episode,10);
+if(!malId||!Number.isInteger(malEpisode)||malEpisode<1)return null;
 return{
-tmdbEpisode:Number(tmdbEpisode)||1,
-malEpisode:Number(malEpisode)||Number(tmdbEpisode)||1,
-anizoneEpisode:Number(anizoneEpisode)||Number(malEpisode)||Number(tmdbEpisode)||1,
-episodeLink:String(selectedEpisode.episodeLink),
-id:"",
-imdb_id:mapping.imdb_id||"",
-season:Number(season)||1,
-episode:Number(anizoneEpisode)||Number(malEpisode)||Number(tmdbEpisode)||1,
-mal_id:String(mapping.mal_id),
-anime_title:animeTitle||"",
-titles:Array.isArray(targetTitles)?[...new Set(targetTitles.filter(Boolean))]:[],
-episodeTitle:selectedEpisode.episodeTitle||"",
-thumbnail:selectedEpisode.thumbnail||"",
-isFiller:!!selectedEpisode.isFiller,
-hasDub:!!selectedEpisode.hasDub
+id:`cache:${tmdbId}:s${season}:e${episode}`,
+imdb_id:raw.imdb_id||"",
+tmdb_id:String(tmdbId),
+season:parseInt(season,10),
+episode:parseInt(episode,10),
+mal_id:malId,
+anilist_id:raw.anilist_id||"",
+mal_episode:malEpisode,
+anime_title:typeof raw.animeTitle==="string"?raw.animeTitle:typeof raw.anime_title==="string"?raw.anime_title:"",
+titles:Array.isArray(raw.titles)?raw.titles.filter(v=>typeof v==="string"):[],
+air_date:typeof raw.air_date==="string"?raw.air_date:"",
+source:"cache",
+tvdb_id:raw.tvdbId||raw.tvdb_id||"",
+anizone_episode:parseInt(raw.anizoneEpisode||raw.anizone_episode,10)||0,
+episode_link:typeof raw.episodeLink==="string"?raw.episodeLink:""
 };
 }
 
-function buildCacheRecord(tmdbId,season,episode,mapping,animeTitle,targetTitles,card,selectedEpisode,episodeData,episodeList){
-if(!mapping||!mapping.mal_id)return null;
-const malId=String(mapping.mal_id);
-const mappedEp=Number(mapping.mal_episode)||Number(episode)||1;
-const cachedEpisode=buildCacheEpisode(
-tmdbId,
-season,
-episode,
-mappedEp,
-mappedEp,
-episodeData,
-selectedEpisode,
-animeTitle,
-targetTitles,
-card,
-mapping
-);
-if(!cachedEpisode)return null;
-const episodes={};
-episodes[String(episode)]=cachedEpisode;
-return{
-malId,
-title:animeTitle||mapping.anime_title||"",
-titles:[...new Set((targetTitles||[]).filter(Boolean))],
+function saveAnimeCache(malId,animeTitle,targetTitles,tmdbId,tvdbId,season,tmdbEpisode,malEpisode,anizoneEpisode,card,episodeList,selectedEpisode){
+return __async(this,null,function*(){
+if(!malId||!selectedEpisode||!selectedEpisode.episodeLink)return false;
+try{
+const existing=yield getAnimeCacheByMal(malId);
+const seasons=existing&&existing.seasons&&typeof existing.seasons==="object"?__spreadValues({},existing.seasons):{};
+const oldSeason=seasons[String(season)]&&typeof seasons[String(season)]==="object"?seasons[String(season)]:{};
+const episodes=oldSeason.episodes&&typeof oldSeason.episodes==="object"?__spreadValues({},oldSeason.episodes):{};
+for(const ep of Array.isArray(episodeList)?episodeList:[]){
+if(!ep||!ep.episodeLink)continue;
+const n=parseInt(ep.episodeNumber,10);
+if(!Number.isInteger(n)||n<1)continue;
+const old=episodes[String(n)]||{};
+episodes[String(n)]=__spreadProps(__spreadValues({},old),{
+episode:n,
+anizoneEpisode:n,
+episodeLink:String(ep.episodeLink),
+id:String(ep.episodeLink),
+season:parseInt(season,10),
+malId:String(malId),
+mal_id:String(malId),
+animeTitle:animeTitle||old.animeTitle||"",
+anime_title:animeTitle||old.anime_title||"",
+titles:Array.isArray(targetTitles)&&targetTitles.length?targetTitles.filter(Boolean).slice(0,30):old.titles||[],
+episodeTitle:ep.episodeTitle||old.episodeTitle||"",
+thumbnail:ep.thumbnail||old.thumbnail||"",
+isFiller:ep.isFiller===true,
+hasDub:ep.hasDub===true
+});
+}
+const selectedNum=parseInt(selectedEpisode.episodeNumber,10);
+if(!Number.isInteger(selectedNum)||selectedNum<1)return false;
+const current=episodes[String(selectedNum)]||{};
+episodes[String(selectedNum)]=__spreadProps(__spreadValues({},current),{
 tmdbId:String(tmdbId),
-tvdbId:mapping.tvdb_id?String(mapping.tvdb_id):"",
-tmdbIds:[String(tmdbId)],
-tvdbIds:mapping.tvdb_id?[String(mapping.tvdb_id)]:[],
-season:Number(season)||1,
-episode:Number(episode)||1,
-seasons:{
-[String(season)]:{
-season:Number(season)||1,
-tmdbSeason:Number(season)||1,
-malSeason:Number(season)||1,
-animeSlug:card&&card.slug||"",
-animeUrl:card&&(card.url||"")||"",
-episodeCount:Array.isArray(episodeList)?episodeList.length:0,
+tmdbEpisode:parseInt(tmdbEpisode,10),
+tmdbSeason:parseInt(season,10),
+tvdbId:String(tvdbId||current.tvdbId||""),
+malId:String(malId),
+malEpisode:parseInt(malEpisode,10),
+anizoneEpisode:selectedNum,
+episode:selectedNum,
+episodeLink:String(selectedEpisode.episodeLink),
+id:String(selectedEpisode.episodeLink)
+});
+seasons[String(season)]={
+season:parseInt(season,10),
+animeSlug:card&&card.slug||oldSeason.animeSlug||"",
+animeUrl:card&&card.url||oldSeason.animeUrl||"",
+episodeCount:Object.keys(episodes).length,
 episodes,
-createdAt:Date.now(),
 lastUsed:Date.now(),
 updatedAt:Date.now()
-}
-},
-episodeData:{
-malEpisode:mappedEp,
-anizoneEpisode:mappedEp,
-episodeLink:selectedEpisode.episodeLink
-}
 };
+const payload={
+version:4,
+malId:String(malId),
+title:(existing&&existing.title)||animeTitle||"",
+titles:[...new Set([...(existing&&Array.isArray(existing.titles)?existing.titles:[]),...(Array.isArray(targetTitles)?targetTitles:[])].filter(Boolean))].slice(0,50),
+tmdbId:String(tmdbId||((existing&&existing.tmdbId)||"")),
+tvdbId:String(tvdbId||((existing&&existing.tvdbId)||"")),
+seasons,
+mappings:__spreadValues({},existing&&existing.mappings||{}),
+updatedAt:Date.now()
+};
+const mappingKey=`tmdb:${tmdbId}:s${season}:e${tmdbEpisode}`;
+payload.mappings[mappingKey]={tmdbId:String(tmdbId),tmdbSeason:parseInt(season,10),tmdbEpisode:parseInt(tmdbEpisode,10),tvdbId:String(tvdbId||""),malId:String(malId),malEpisode:parseInt(malEpisode,10),anizoneEpisode:selectedNum,episodeLink:String(selectedEpisode.episodeLink),animeTitle:animeTitle||"",titles:Array.isArray(targetTitles)?targetTitles.filter(Boolean).slice(0,30):[],updatedAt:Date.now()};
+const res=yield fetchWithTimeout(ANIME_CACHE_URL,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({key:`mal:${String(malId)}`,data:payload})},ANIME_CACHE_TIMEOUT);
+if(!res.ok){console.log(`[AniZone] Anime cache save HTTP ${res.status}`);return false;}
+console.log(`[AniZone] Anime cache saved MAL=${malId} TMDB=S${season}E${tmdbEpisode} MAL=E${malEpisode} AniZone=E${selectedNum}`);
+return true;
+}catch(e){
+console.log(`[AniZone] Anime cache save failed: ${e.message}`);
+return false;
+}
+});
 }
 
 function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
@@ -916,34 +851,28 @@ try{
 season=parseInt(season,10)||1;
 episode=parseInt(episode,10)||1;
 console.log(`[AniZone] Querying streams for TMDB: ${tmdbId}, Type: ${mediaType}, S${season}E${episode}`);
-
-if(mediaType==="tv"){
-const cached=yield getAnimeCacheByTmdb(tmdbId,season,episode);
-if(cached&&cached.episodeLink){
-console.log(`[AniZone] Trying cached AniZone episode for TMDB=${tmdbId} S${season}E${episode} -> ${cached.episodeLink}`);
-const cachedEpisodeData=yield fetchEpisodePageByLink(cached.episodeLink);
-if(cachedEpisodeData&&cachedEpisodeData.parsed&&cachedEpisodeData.parsed.masterUrl){
-const cachedTitle=cached.animeTitle||cached.anime_title||"";
-const cachedMappedEp=Number(cached.anizoneEpisode||cached.malEpisode||episode);
-const cachedStreams=yield getStreamsFromEpisodePage(cachedTitle,cachedMappedEp,cachedEpisodeData);
-if(cachedStreams.length){
-console.log(`[AniZone] Cached resolution succeeded for TMDB=${tmdbId} S${season}E${episode}`);
-return cachedStreams;
-}
-console.log(`[AniZone] Cached episode failed, falling back to normal resolution`);
-}else{
-console.log(`[AniZone] Cached episode page failed, falling back to normal resolution`);
-}
-}
-
 let animeTitle="";
 let altTitles=[];
 let targetTitles=[];
 let mappedEp=episode;
 let seasonName="";
 let mapping=null;
-
+let cacheMapping=null;
+let cacheRecord=null;
 if(mediaType==="tv"){
+cacheMapping=yield getAnimeCacheByTmdb(tmdbId,season,episode);
+if(cacheMapping){
+cacheRecord=cacheMapping.data||null;
+const normalized=normalizeCachedMapping(cacheMapping.mapping,tmdbId,season,episode);
+if(normalized){
+mapping=normalized;
+mappedEp=normalized.mal_episode;
+animeTitle=normalized.anime_title||"";
+if(Array.isArray(normalized.titles))targetTitles.push(...normalized.titles);
+console.log(`[AniZone] Anime cache TMDB HIT S${season}E${episode} -> MAL=${normalized.mal_id} E${mappedEp}`);
+}
+}
+if(!mapping){
 mapping=yield resolveMapping(null,season,episode,tmdbId);
 if(mapping){
 mappedEp=parseInt(mapping.mal_episode,10)||episode;
@@ -951,15 +880,18 @@ animeTitle=mapping.anime_title||"";
 if(Array.isArray(mapping.titles))targetTitles.push(...mapping.titles);
 if(!animeTitle&&mapping.mal_id){
 const malTitle=yield getMalTitle(mapping.mal_id);
-if(malTitle){
-targetTitles.push(malTitle);
-animeTitle=malTitle;
-}
+if(malTitle){targetTitles.push(malTitle);animeTitle=malTitle;}
 }
 targetTitles=[...new Set(targetTitles.filter(Boolean))];
 console.log(`[AniZone] Mapping resolved: "${animeTitle}" S${season}E${episode} -> MAL E${mappedEp} [${mapping.source||"unknown"}]`);
 }
-
+}
+if(mapping&&!animeTitle&&mapping.mal_id){
+const malTitle=yield getMalTitle(mapping.mal_id);
+if(malTitle){targetTitles.push(malTitle);animeTitle=malTitle;}
+}
+if(mapping&&Array.isArray(mapping.titles))targetTitles.push(...mapping.titles);
+targetTitles=[...new Set(targetTitles.filter(Boolean))];
 const tmdbInfo=yield getTmdbInfo(tmdbId,"tv",season);
 if(tmdbInfo){
 if(!animeTitle)animeTitle=tmdbInfo.title;
@@ -967,7 +899,6 @@ if(tmdbInfo.originalTitle)altTitles.push(tmdbInfo.originalTitle);
 seasonName=tmdbInfo.seasonName||"";
 if(!targetTitles.length&&tmdbInfo.originalTitle)targetTitles.push(tmdbInfo.originalTitle);
 }
-
 targetTitles=[...new Set(targetTitles.concat(animeTitle?[animeTitle]:[],altTitles).filter(Boolean))];
 }else{
 const tmdbInfo=yield getTmdbInfo(tmdbId,"movie");
@@ -978,47 +909,61 @@ if(tmdbInfo.originalTitle)altTitles.push(tmdbInfo.originalTitle);
 targetTitles=[...new Set([animeTitle,...altTitles].filter(Boolean))];
 mappedEp=1;
 }
-
 if(!animeTitle&&targetTitles.length)animeTitle=targetTitles[0];
 if(!animeTitle)return[];
-
+if(mediaType==="tv"&&mapping&&mapping.mal_id&&!cacheRecord){
+cacheRecord=yield getAnimeCacheByMal(mapping.mal_id);
+if(cacheRecord){
+const cachedMapping=cacheRecord.mappings&&cacheRecord.mappings[`tmdb:${tmdbId}:s${season}:e${episode}`];
+const cachedSeason=cacheRecord.seasons&&cacheRecord.seasons[String(season)];
+if(cachedMapping&&cachedMapping.episodeLink){
+const cachedAniEp=parseInt(cachedMapping.anizoneEpisode,10);
+console.log(`[AniZone] Anime cache exact link HIT S${season}E${episode} -> AniZone E${cachedAniEp||"?"}`);
+const cachedEpisodeData=yield fetchEpisodePageByLink(cachedMapping.episodeLink);
+if(cachedEpisodeData&&cachedEpisodeData.parsed&&cachedEpisodeData.parsed.masterUrl){
+const cachedStreams=yield getStreamsFromEpisodePage(animeTitle,cachedMapping.malEpisode||mappedEp,cachedEpisodeData);
+if(cachedStreams.length){
+console.log(`[AniZone] Anime cache stream SUCCESS S${season}E${episode}`);
+return cachedStreams;
+}
+console.log(`[AniZone] Anime cache exact link failed; falling back to normal AniZone resolution`);
+}
+}else if(cachedSeason&&cachedSeason.episodes){
+const cachedEp=Object.values(cachedSeason.episodes).find(ep=>parseInt(ep.malEpisode||ep.mal_episode,10)===mappedEp&&ep.episodeLink);
+if(cachedEp){
+const cachedEpisodeData=yield fetchEpisodePageByLink(cachedEp.episodeLink);
+if(cachedEpisodeData&&cachedEpisodeData.parsed&&cachedEpisodeData.parsed.masterUrl){
+const cachedStreams=yield getStreamsFromEpisodePage(animeTitle,mappedEp,cachedEpisodeData);
+if(cachedStreams.length){
+console.log(`[AniZone] Anime cache MAL episode stream SUCCESS E${mappedEp}`);
+return cachedStreams;
+}
+}
+console.log(`[AniZone] Anime cache MAL episode link failed; falling back to normal AniZone resolution`);
+}
+}
+}
+}
 const baseCleanQuery=animeTitle.split(":")[0].replace(/season.*|\d+nd season|\d+rd season|\d+th season|saison.*/gi,"").trim();
 const specificTargetTitles=[...new Set([...targetTitles,animeTitle,...altTitles].filter(Boolean))];
-
 let card=yield searchAnimeCard(baseCleanQuery,specificTargetTitles,baseCleanQuery,season,seasonName);
-
 if(!card){
-const freshQueries=[
-baseCleanQuery,
-animeTitle.split(":")[0].trim(),
-...altTitles.map(t=>t.split(":")[0].trim()),
-...targetTitles.map(t=>t.split(":")[0].trim())
-].filter(Boolean);
+const freshQueries=[baseCleanQuery,animeTitle.split(":")[0].trim(),...altTitles.map(t=>t.split(":")[0].trim()),...targetTitles.map(t=>t.split(":")[0].trim())].filter(Boolean);
 for(const query of [...new Set(freshQueries)]){
 card=yield searchAnimeCard(query,specificTargetTitles,query,season,seasonName,true);
 if(card)break;
 }
 }
-
 if(!card){
 console.log(`[AniZone] No AniZone anime result found for "${animeTitle}"`);
 return[];
 }
-
 const alias=card.url||`${MAIN_URL}/anime/${card.slug}`;
 console.log(`[AniZone] AnimeStream search matched "${animeTitle}" -> ${alias}`);
-
 let episodeList=yield fetchAnimeEpisodeList(alias);
-
 if(!episodeList.length){
 console.log(`[AniZone] No episode list from selected AniZone page; forcing fresh title search`);
-const freshQueries=[
-baseCleanQuery,
-animeTitle.split(":")[0].trim(),
-...altTitles.map(t=>t.split(":")[0].trim()),
-...targetTitles.map(t=>t.split(":")[0].trim())
-].filter(Boolean);
-
+const freshQueries=[baseCleanQuery,animeTitle.split(":")[0].trim(),...altTitles.map(t=>t.split(":")[0].trim()),...targetTitles.map(t=>t.split(":")[0].trim())].filter(Boolean);
 for(const query of [...new Set(freshQueries)]){
 const freshCard=yield searchAnimeCard(query,specificTargetTitles,query,season,seasonName,true);
 if(!freshCard)continue;
@@ -1031,45 +976,25 @@ break;
 }
 }
 }
-
 const selectedEpisode=episodeList[mappedEp-1];
-
 if(!selectedEpisode||!selectedEpisode.episodeLink){
 console.log(`[AniZone] Episode E${mappedEp} not found in AniZone episode list (${episodeList.length} episodes)`);
 return[];
 }
-
 console.log(`[AniZone] AnimeStream selected exact episode link E${mappedEp}: ${selectedEpisode.episodeLink}`);
-
 const episodeData=yield fetchEpisodePageByLink(selectedEpisode.episodeLink);
-
 if(!episodeData||!episodeData.parsed||!episodeData.parsed.masterUrl){
 console.log(`[AniZone] AnimeStream stream extraction failed for E${mappedEp}`);
 return[];
 }
-
 const streams=yield getStreamsFromEpisodePage(animeTitle,mappedEp,episodeData);
 console.log(`[AniZone] Total streams found: ${streams.length}`);
-
 if(streams.length&&mediaType==="tv"&&mapping&&mapping.mal_id){
-const cacheRecord=buildCacheRecord(
-tmdbId,
-season,
-episode,
-mapping,
-animeTitle,
-specificTargetTitles,
-card,
-selectedEpisode,
-episodeData,
-episodeList
-);
-
-if(cacheRecord){
-yield saveAnimeCache(cacheRecord);
+const tvdbId=mapping.tvdb_id||"";
+try{
+yield saveAnimeCache(mapping.mal_id,animeTitle,specificTargetTitles,tmdbId,tvdbId,season,episode,mappedEp,selectedEpisode.episodeNumber,card,episodeList,selectedEpisode);
+}catch(e){console.log(`[AniZone] Cache write ignored: ${e.message}`);}
 }
-}
-
 return streams;
 }catch(error){
 console.log(`[AniZone] Error: ${error&&error.message||error}`);
