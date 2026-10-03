@@ -1,296 +1,182 @@
 const{getStore}=require("@netlify/blobs");
 
 const STORE_NAME="anime-resolution-cache";
-const INDEX_KEY="_cache_index";
-const MAX_CACHE_BYTES=5*1024*1024;
-const MAX_EPISODES=50;
-const MAX_BODY_BYTES=100000;
+const INDEX_KEY="_anibridge_index";
+const SOURCE_URL="https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json";
+const MAX_BYTES=25*1024*1024;
+
+export const config={schedule:"@daily"};
 
 function json(statusCode,body){
   return{
     statusCode,
-    headers:{
-      "Content-Type":"application/json",
-      "Cache-Control":"no-store",
-      "Access-Control-Allow-Origin":"*",
-      "Access-Control-Allow-Methods":"GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers":"Content-Type"
-    },
+    headers:{"Content-Type":"application/json","Cache-Control":"no-store"},
     body:JSON.stringify(body)
   };
 }
 
-function validKey(key){
-  return typeof key==="string"&&/^[A-Za-z0-9_-]+:s\d+$/.test(key)&&key.length<=100;
+function parseRange(value){
+  if(typeof value!=="string")return null;
+  const clean=value.split("|")[0];
+  const parts=clean.split(",");
+  const ranges=[];
+  for(const part of parts){
+    const m=part.trim().match(/^(\d+)(?:-(\d*))?$/);
+    if(!m)continue;
+    const start=parseInt(m[1],10);
+    let end=m[2]===""?Infinity:m[2]?parseInt(m[2],10):start;
+    if(!Number.isFinite(start)||start<1)continue;
+    if(end!==Infinity&&(end<start||end<1))continue;
+    ranges.push([start,end]);
+  }
+  return ranges.length?ranges:null;
 }
 
-function cleanString(value,max=500){
-  if(typeof value!=="string")return"";
-  return value.slice(0,max);
-}
+function mapEpisode(sourceEpisode,sourceRange,targetRange){
+  const source=parseRange(sourceRange);
+  const target=parseRange(targetRange);
+  if(!source||!target)return null;
 
-function cleanEpisode(value){
-  if(!value||typeof value!=="object")return null;
+  for(const[sStart,sEnd]of source){
+    if(sourceEpisode<sStart||sourceEpisode>sEnd)continue;
 
-  const episode=parseInt(value.episode,10);
-  const malEpisode=parseInt(value.mal_episode,10);
-  const season=parseInt(value.season,10);
+    const offset=sourceEpisode-sStart;
+    let targetEpisode;
 
-  if(!Number.isFinite(episode)||!Number.isFinite(malEpisode)||!Number.isFinite(season))return null;
-  if(episode<1||malEpisode<1||season<1)return null;
+    if(target.length===1){
+      const[tStart,tEnd]=target[0];
+      if(tEnd===Infinity){
+        targetEpisode=tStart+offset;
+      }else{
+        const count=tEnd-tStart+1;
+        targetEpisode=tStart+Math.min(offset,count-1);
+      }
+    }else{
+      let remaining=offset;
+      for(const[tStart,tEnd]of target){
+        const length=tEnd===Infinity?Infinity:tEnd-tStart+1;
+        if(remaining<length){
+          targetEpisode=tStart+remaining;
+          break;
+        }
+        remaining-=length;
+      }
+    }
 
-  return{
-    id:cleanString(value.id,150),
-    imdb_id:cleanString(value.imdb_id,30),
-    season,
-    episode,
-    mal_id:cleanString(String(value.mal_id||""),30),
-    mal_episode:malEpisode,
-    anime_title:cleanString(value.anime_title,500),
-    titles:Array.isArray(value.titles)
-      ?value.titles.filter(v=>typeof v==="string").slice(0,30).map(v=>v.slice(0,300))
-      :[],
-    air_date:cleanString(value.air_date,30)
-  };
-}
-
-function cleanValue(value){
-  if(!value||typeof value!=="object")return null;
-
-  const animeSlug=cleanString(value.animeSlug,300);
-  const season=parseInt(value.season,10);
-
-  if(!animeSlug||!Number.isFinite(season)||season<1)return null;
-
-  const sourceEpisodes=value.episodes;
-
-  if(!sourceEpisodes||typeof sourceEpisodes!=="object")return null;
-
-  const episodes={};
-
-  for(const[key,raw]of Object.entries(sourceEpisodes)){
-    if(Object.keys(episodes).length>=MAX_EPISODES)break;
-
-    const episode=cleanEpisode(raw);
-
-    if(!episode)continue;
-
-    const epNum=parseInt(key,10);
-
-    if(!Number.isFinite(epNum)||epNum!==episode.episode)continue;
-
-    episodes[String(epNum)]=episode;
+    if(Number.isFinite(targetEpisode))return targetEpisode;
   }
 
-  if(!Object.keys(episodes).length)return null;
+  return null;
+}
 
+function descriptorInfo(descriptor){
+  if(typeof descriptor!=="string")return null;
+  const m=descriptor.match(/^(anilist|mal|tmdb_show|imdb_show|tvdb_show):([^:]+)(?::(s\d+))?$/);
+  if(!m)return null;
   return{
-    version:1,
-    animeSlug,
-    season,
-    episodes
+    provider:m[1],
+    id:m[2],
+    season:m[3]?parseInt(m[3].slice(1),10):null
   };
 }
 
-function byteSize(value){
-  return Buffer.byteLength(JSON.stringify(value),"utf8");
-}
+function buildIndex(data){
+  const index={version:1,updatedAt:Date.now(),entries:{}};
 
-async function getIndex(store){
-  try{
-    const index=await store.get(INDEX_KEY,{type:"json"});
+  for(const[sourceDescriptor,targets]of Object.entries(data||{})){
+    if(!sourceDescriptor.startsWith("tmdb_show:"))continue;
 
-    if(index&&typeof index==="object"&&index.entries&&typeof index.entries==="object"){
-      return{
-        totalBytes:Number(index.totalBytes)||0,
-        entries:index.entries
-      };
+    const sourceInfo=descriptorInfo(sourceDescriptor);
+    if(!sourceInfo||sourceInfo.season===null)continue;
+    if(!targets||typeof targets!=="object")continue;
+
+    const entry={
+      tmdbId:sourceInfo.id,
+      season:sourceInfo.season,
+      mappings:{}
+    };
+
+    for(const[targetDescriptor,ranges]of Object.entries(targets)){
+      const targetInfo=descriptorInfo(targetDescriptor);
+      if(!targetInfo)continue;
+      if(targetInfo.provider!=="anilist"&&targetInfo.provider!=="mal")continue;
+      if(!ranges||typeof ranges!=="object")continue;
+
+      const mapped=[];
+
+      for(const[sourceRange,targetRange]of Object.entries(ranges)){
+        const parsedSource=parseRange(sourceRange);
+        if(!parsedSource)continue;
+
+        let start=parsedSource[0][0];
+        let end=parsedSource[0][1];
+
+        if(end===Infinity)end=start+10000;
+
+        for(let episode=start;episode<=end;episode++){
+          const targetEpisode=mapEpisode(episode,sourceRange,targetRange);
+          if(!targetEpisode)continue;
+
+          mapped.push({
+            from:episode,
+            to:targetEpisode
+          });
+        }
+      }
+
+      if(mapped.length){
+        entry.mappings[targetDescriptor]=mapped;
+      }
     }
-  }catch(_){}
 
-  return{
-    totalBytes:0,
-    entries:{}
-  };
-}
-
-async function saveIndex(store,index){
-  await store.setJSON(INDEX_KEY,index);
-}
-
-async function removeUntilFits(store,index,key,newSize){
-  while(index.totalBytes+newSize>MAX_CACHE_BYTES){
-    const candidates=Object.keys(index.entries).filter(k=>k!==key);
-
-    if(!candidates.length)return false;
-
-    candidates.sort((a,b)=>{
-      const aTime=Number(index.entries[a]&&index.entries[a].lastUsed)||0;
-      const bTime=Number(index.entries[b]&&index.entries[b].lastUsed)||0;
-      return aTime-bTime;
-    });
-
-    const oldest=candidates[0];
-    const oldSize=Number(index.entries[oldest]&&index.entries[oldest].size)||0;
-
-    try{
-      await store.delete(oldest);
-    }catch(_){}
-
-    delete index.entries[oldest];
-    index.totalBytes=Math.max(0,index.totalBytes-oldSize);
+    if(Object.keys(entry.mappings).length){
+      index.entries[sourceDescriptor]=entry;
+    }
   }
 
-  return true;
+  return index;
 }
 
-exports.handler=async event=>{
+export default async()=>{
   try{
-    const method=(event.httpMethod||"GET").toUpperCase();
-
-    if(method==="OPTIONS"){
-      return{
-        statusCode:204,
-        headers:{
-          "Access-Control-Allow-Origin":"*",
-          "Access-Control-Allow-Methods":"GET,POST,OPTIONS",
-          "Access-Control-Allow-Headers":"Content-Type"
-        },
-        body:""
-      };
-    }
-
-    const store=getStore({
-      name:STORE_NAME
+    const response=await fetch(SOURCE_URL,{
+     headers:{
+        "User-Agent":"Breezy-Plugins-AniZone/1.0",
+        "Accept":"application/json"
+      }
     });
 
-    if(method==="GET"){
-      const key=event.queryStringParameters&&event.queryStringParameters.key;
-
-      if(!validKey(key)){
-        return json(400,{
-          error:"Invalid cache key"
-        });
-      }
-
-      const cached=await store.get(key,{type:"json"});
-
-      if(!cached){
-        return json(404,{
-          hit:false
-        });
-      }
-
-      const index=await getIndex(store);
-
-      if(index.entries[key]){
-        index.entries[key].lastUsed=Date.now();
-        saveIndex(store,index).catch(()=>{});
-      }
-
-      return json(200,{
-        hit:true,
-        data:cached
-      });
+    if(!response.ok){
+      throw new Error(`AniBridge download failed: HTTP ${response.status}`);
     }
 
-    if(method==="POST"){
-      const rawBody=event.body||"";
+    const text=await response.text();
 
-      if(Buffer.byteLength(rawBody,"utf8")>MAX_BODY_BYTES){
-        return json(413,{
-          error:"Payload too large"
-        });
-      }
-
-      let body;
-
-      try{
-        body=JSON.parse(rawBody);
-      }catch(_){
-        return json(400,{
-          error:"Invalid JSON"
-        });
-      }
-
-      const key=body&&body.key;
-      const value=cleanValue(body&&body.data);
-
-      if(!validKey(key)){
-        return json(400,{
-          error:"Invalid cache key"
-        });
-      }
-
-      if(!value){
-        return json(400,{
-          error:"Invalid cache data"
-        });
-      }
-
-      const size=byteSize(value);
-
-      if(size>MAX_CACHE_BYTES){
-        return json(413,{
-          error:"Cache entry exceeds 5 MB cache limit"
-        });
-      }
-
-      const index=await getIndex(store);
-      const previous=index.entries[key];
-
-      if(previous){
-        index.totalBytes=Math.max(
-          0,
-          index.totalBytes-(Number(previous.size)||0)
-        );
-        delete index.entries[key];
-      }
-
-      const fits=await removeUntilFits(
-        store,
-        index,
-        key,
-        size
-      );
-
-      if(!fits){
-        return json(507,{
-          error:"Cache capacity reached"
-        });
-      }
-
-      await store.setJSON(key,value);
-
-      index.entries[key]={
-        size,
-        createdAt:previous
-          ?Number(previous.createdAt)||Date.now()
-          :Date.now(),
-        lastUsed:Date.now()
-      };
-
-      index.totalBytes+=size;
-
-      await saveIndex(store,index);
-
-      return json(200,{
-        ok:true,
-        key,
-        size,
-        totalBytes:index.totalBytes,
-        maxBytes:MAX_CACHE_BYTES
-      });
+    if(Buffer.byteLength(text,"utf8")>MAX_BYTES){
+      throw new Error("AniBridge mapping file exceeds safety limit");
     }
 
-    return json(405,{
-      error:"Method not allowed"
+    const data=JSON.parse(text);
+    const index=buildIndex(data);
+
+    const store=getStore({name:STORE_NAME});
+
+    await store.setJSON(INDEX_KEY,index);
+
+    console.log(
+      `[ANIBRIDGE] Updated ${Object.keys(index.entries).length} TMDB season mappings`
+    );
+
+    return json(200,{
+      ok:true,
+      entries:Object.keys(index.entries).length,
+      updatedAt:index.updatedAt
     });
   }catch(error){
-    console.error("[ANIME CACHE]",error);
-
+    console.error("[ANIBRIDGE]",error);
     return json(500,{
-      error:"Cache service error"
+      ok:false,
+      error:error.message
     });
   }
 };
