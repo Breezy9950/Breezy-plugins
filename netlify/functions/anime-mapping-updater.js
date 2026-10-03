@@ -188,8 +188,10 @@ async function update(){
     }
 
     const store=getStore({
-      name:STORE_NAME
-    });
+  name:STORE_NAME,
+  siteID:process.env.NETLIFY_SITE_ID,
+  token:process.env.NETLIFY_AUTH_TOKEN
+});
 
     await store.setJSON(
       INDEX_KEY,
