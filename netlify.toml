@@ -1,10 +1,15 @@
 [build]
   functions = "netlify/functions"
 
-[functions."anime-mapping-updater"]
-  schedule = "@daily"
+[[redirects]]
+  from = "/api/anime-cache"
+  to = "/.netlify/functions/anime-cache"
+  status = 200
 
 [[redirects]]
   from = "/api/anime-mapping"
   to = "/.netlify/functions/anime-mapping"
   status = 200
+
+[functions."anime-mapping-updater"]
+  schedule = "@daily"
