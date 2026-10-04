@@ -22,7 +22,7 @@ var HEADERS={
 "Referer":"https://anizone.to/"
 };
 var TMDB_API_KEY="68e094699525b18a70bab2f86b1fa706";
-var ANIME_MAPPING_URL="https://breezy-plugins.netlify.app/api/anime-mapping";
+var ANIME_MAPPING_URL="https://breezy-plugins.netlify.app/.netlify/functions/anime-mapping";
 var HEX_ESCAPE=/\\x([0-9a-fA-F]{2})/g;
 var INVALID_BACKSLASH=/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g;
 var MAPPING_MEMORY_CACHE=new Map;
