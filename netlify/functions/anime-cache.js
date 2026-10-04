@@ -1,4 +1,4 @@
-const{getStore}=require("@netlify/blobs");
+/*const{getStore}=require("@netlify/blobs");
 const STORE_NAME="anime-resolution-cache";
 const INDEX_KEY="_anime_cache_index";
 const TMDB_INDEX_KEY="_anime_tmdb_index";
@@ -345,3 +345,4 @@ out[k].episodeCount=Object.keys(out[k].episodes).length;
 }
 return out;
 }
+*/
