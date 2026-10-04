@@ -427,26 +427,39 @@ return str.toLowerCase().replace(/[^a-z0-9]/g,"").trim();
 }
 function parseCards(html,$){
 const cards=[];
-const data=$("main").children().eq(1);
-const divData=data.attr("x-data")||"";
-const matchRegEx=/JSON\.parse\('(.+?)'\)/s;
-const match=matchRegEx.exec(divData);
-if(!match)return cards;
+const itemsMatch=html.match(/items:\s*JSON\.parse\('((?:[^'\\]|\\.)*)'\)/);
+if(itemsMatch){
 try{
-const parsed=JSON.parse(match[1].replace(/\\u0022/g,'"'));
-if(!Array.isArray(parsed))return cards;
+const parsed=parseXDataJson(itemsMatch[1]);
+if(Array.isArray(parsed)){
 for(const item of parsed){
-if(!item)continue;
-const title=item.main_title;
-const img=item.cover;
-const href=item.url;
-if(!href||!title)continue;
+if(!item||!item.slug)continue;
 const titles=new Set;
-titles.add(title);
+if(item.main_title)titles.add(item.main_title);
 if(item.title_list&&typeof item.title_list==="object")Object.values(item.title_list).forEach(t=>{if(t)titles.add(t);});
-cards.push({slug:item.slug||String(href).split("/").filter(Boolean).pop(),url:String(href).replace(/\\/g,""),imageUrl:img||"",titles:Array.from(titles)});
+cards.push({slug:item.slug,url:item.url||`/anime/${item.slug}`,titles:Array.from(titles)});
 }
-}catch(e){console.log(`[AniZone] Search data parse failed: ${e.message}`);}
+}
+}catch(_){}
+}
+if(cards.length===0){
+$('[x-data*="anmTitles"]').each((i,el)=>{
+const href=$(el).find('a[href*="/anime/"]').first().attr("href");
+if(!href)return;
+const parts=href.split("/");
+const slug=parts[parts.length-1]||parts[parts.length-2];
+const titles=new Set;
+const xData=$(el).attr("x-data")||"";
+const jsonMatch=xData.match(/JSON\.parse\('((?:[^'\\]|\\.)*)'\)/);
+if(jsonMatch){
+try{
+const parsed=parseXDataJson(jsonMatch[1]);
+Object.values(parsed).forEach(t=>{if(t)titles.add(t);});
+}catch(_){}
+}
+cards.push({slug,titles:Array.from(titles)});
+});
+}
 return cards;
 }
 function searchCards(query){
@@ -574,7 +587,7 @@ return __async(this,null,function*(){
 const cacheKey=`card|${query}|${season}|${targetTitles.join("|")}`;
 if(!bypassCache){
 const cached=cacheGet(SLUG_CACHE,cacheKey,10*60*1000);
-if(cached&&typeof cached==="object")return cached;
+if(cached)return cached;
 }
 let cards=yield searchCards(query);
 if(cards.length===0&&baseTitle&&baseTitle!==query)cards=yield searchCards(baseTitle);
@@ -588,9 +601,9 @@ if(cards.length)break;
 }
 if(!cards.length)return null;
 const slug=matchCard(cards,targetTitles,baseTitle||query,season,seasonName);
-const card=cards.find(c=>c.slug===slug)||cards.find(c=>c.url);
+const card=cards.find(c=>c.slug===slug)||null;
 if(card&&!bypassCache)cacheSet(SLUG_CACHE,cacheKey,card);
-return card||null;
+return card;
 });
 }
 function fetchAnimeEpisodeList(alias){
@@ -601,37 +614,30 @@ if(!response.ok||!response.text)return[];
 try{
 const $=import_cheerio_without_node_native.default.load(response.text);
 const dataDiv=$("main").children().first();
-if(!dataDiv.length){
-console.log(`[AniZone] Couldn't find episode data div`);
-return[];
-}
 const divData=dataDiv.attr("x-data")||"";
-const matchRegEx=/items:\s*JSON\.parse\('(.+?)'\)/s;
+const matchRegEx=/items:\s*JSON\.parse\('((?:[^'\\]|\\.)*)'\)/;
 const match=matchRegEx.exec(divData);
 if(!match||!match[1]){
-console.log(`[AniZone] Couldn't find episodes data`);
+console.log(`[AniZone] Episode list JSON not found for ${alias}`);
 return[];
 }
-const matchedStr=match[1].replace(/\\u0022/g,'"');
-const list=JSON.parse(matchedStr);
+const list=parseXDataJson(match[1]);
 if(!Array.isArray(list))return[];
-const epList=[];
+const episodes=[];
 let i=1;
 for(const item of list){
-if(!item)continue;
-const epLink=item.url;
-if(!epLink){
-console.log(`[AniZone] Episode ${i} has no episode URL`);
-continue;
-}
-const title=item.title_list&&item.title_list["1"]||"";
-const epImg=item.snapshot?String(item.snapshot).replace(/\\/g,""):null;
-const isFiller=String(item.type||"").toLowerCase()==="filler";
-epList.push({episodeLink:String(epLink).replace(/\\/g,""),episodeNumber:i,thumbnail:epImg,episodeTitle:title,isFiller,hasDub:false});
+if(!item||!item.url)continue;
+episodes.push({
+episodeNumber:i,
+episodeLink:String(item.url).replace(/\\/g,""),
+episodeTitle:item.title_list&&item.title_list["1"]||"",
+thumbnail:item.snapshot?String(item.snapshot).replace(/\\/g,""):"",
+isFiller:String(item.type||"").toLowerCase()==="filler"
+});
 i++;
 }
-console.log(`[AniZone] AnimeStream episode list found ${epList.length} episodes`);
-return epList;
+console.log(`[AniZone] AnimeStream episode list found ${episodes.length} episodes`);
+return episodes;
 }catch(e){
 console.log(`[AniZone] Episode list parse failed: ${e.message}`);
 return[];
@@ -643,40 +649,54 @@ return __async(this,null,function*(){
 if(!episodeLink)return null;
 const response=yield fetchWithCookies(episodeLink);
 if(!response.ok||!response.text)return null;
-try{
 const $=import_cheerio_without_node_native.default.load(response.text);
 const dataDiv=$("div.mb-8").first().children().first();
 const datas=dataDiv.attr("x-data")||"";
-if(!datas){
-console.log(`[AniZone] Couldn't find data for the stream`);
-return null;
-}
-const matchRegEx=/JSON\.parse\('(.+?)'\)/s;
+const matchRegEx=/JSON\.parse\('((?:[^'\\]|\\.)*)'\)/;
 const match=matchRegEx.exec(datas);
-if(!match||!match[1]){
-console.log(`[AniZone] Couldn't find anime stream data`);
-return null;
-}
-const streamData=JSON.parse(match[1].replace(/\\u0022/g,'"'));
-const src=streamData&&streamData.src?String(streamData.src).replace(/\\/g,""):null;
-if(!src)return null;
-const subtitleList=Array.isArray(streamData.subtitles)?streamData.subtitles:[];
-const subs=subtitleList.filter(it=>it&&it.language==="en"&&it.default===true);
-const firstSub=subs.length?subs[0]:null;
-const firstSubUrl=firstSub&&firstSub.file?String(firstSub.file).replace(/\\/g,""):"";
-const subtitleFormat=firstSub&&firstSub.format?firstSub.format:"";
-const srcName=$("button.flex.gap-2.relative").first().text().trim()||"Default";
-return{url:episodeLink,response,html:response.text,$,parsed:{masterUrl:src,subtitles:subtitleList.map(s=>({url:s&&s.file?String(s.file).replace(/\\/g,""):"",name:s&&s.title||s&&s.language||"English",language:s&&s.language||"en",format:s&&s.format||"",default:s&&s.default===true})).filter(s=>s.url),defaultSubtitle:firstSubUrl,subtitleFormat,serverName:srcName,streamData}};
+let streamData=null;
+if(match&&match[1]){
+try{
+streamData=parseXDataJson(match[1]);
 }catch(e){
-console.log(`[AniZone] Stream extraction failed: ${e.message}`);
-return null;
+console.log(`[AniZone] Stream x-data JSON parse failed: ${e.message}`);
 }
+}
+const masterUrl=streamData&&streamData.src?String(streamData.src).replace(/\\/g,""):null;
+const subtitles=streamData&&Array.isArray(streamData.subtitles)?streamData.subtitles.map(s=>({
+url:s&&s.file?String(s.file).replace(/\\/g,""):"",
+name:s&&s.title||s&&s.language||"English",
+language:s&&s.language||"en",
+format:s&&s.format||""
+})).filter(s=>s.url):[];
+const serverName=$("button.flex.gap-2.relative").first().text().replace(/\s+/g," ").trim()||"Default";
+if(!masterUrl)console.log(`[AniZone] AnimeStream player src not found for ${episodeLink}`);
+return{
+url:episodeLink,
+response,
+html:response.text,
+$,
+parsed:{masterUrl,subtitles},
+serverName,
+streamData
+};
 });
 }
 function getStreamsFromEpisodePage(animeTitle,mappedEp,episodeData){
 return __async(this,null,function*(){
 if(!episodeData||!episodeData.parsed||!episodeData.parsed.masterUrl)return[];
-return[{name:"AniZone",title:`${animeTitle} - Episode ${mappedEp} [${episodeData.parsed.serverName||"Default"}]`,url:episodeData.parsed.masterUrl,quality:"multi-quality",headers:HEADERS,subtitles:episodeData.parsed.subtitles,subtitle:episodeData.parsed.defaultSubtitle||"",subtitleFormat:episodeData.parsed.subtitleFormat||"",backup:false}];
+const stream=episodeData.parsed;
+const sub=stream.subtitles.find(s=>s.language==="en"&&s.format)||stream.subtitles.find(s=>s.language==="en")||stream.subtitles[0];
+return[{
+name:"AniZone",
+title:`${animeTitle} - Episode ${mappedEp} [${episodeData.serverName||"Default"}]`,
+url:stream.masterUrl,
+quality:"Multi",
+headers:HEADERS,
+subtitles:stream.subtitles,
+subtitle:sub?sub.url:"",
+subtitleFormat:sub?sub.format:""
+}];
 });
 }
 function getStreams(tmdbId,mediaType="tv",season=1,episode=1){
@@ -699,7 +719,10 @@ animeTitle=mapping.anime_title||"";
 if(Array.isArray(mapping.titles))targetTitles.push(...mapping.titles);
 if(!animeTitle&&mapping.mal_id){
 const malTitle=yield getMalTitle(mapping.mal_id);
-if(malTitle){targetTitles.push(malTitle);animeTitle=malTitle;}
+if(malTitle){
+targetTitles.push(malTitle);
+animeTitle=malTitle;
+}
 }
 targetTitles=[...new Set(targetTitles.filter(Boolean))];
 console.log(`[AniZone] Mapping resolved: "${animeTitle}" S${season}E${episode} -> MAL E${mappedEp} [${mapping.source||"unknown"}]`);
@@ -727,7 +750,12 @@ const baseCleanQuery=animeTitle.split(":")[0].replace(/season.*|\d+nd season|\d+
 const specificTargetTitles=[...new Set([...targetTitles,animeTitle,...altTitles].filter(Boolean))];
 let card=yield searchAnimeCard(baseCleanQuery,specificTargetTitles,baseCleanQuery,season,seasonName);
 if(!card){
-const freshQueries=[baseCleanQuery,animeTitle.split(":")[0].trim(),...altTitles.map(t=>t.split(":")[0].trim()),...targetTitles.map(t=>t.split(":")[0].trim())].filter(Boolean);
+const freshQueries=[
+baseCleanQuery,
+animeTitle.split(":")[0].trim(),
+...altTitles.map(t=>t.split(":")[0].trim()),
+...targetTitles.map(t=>t.split(":")[0].trim())
+].filter(Boolean);
 for(const query of [...new Set(freshQueries)]){
 card=yield searchAnimeCard(query,specificTargetTitles,query,season,seasonName,true);
 if(card)break;
@@ -742,7 +770,12 @@ console.log(`[AniZone] AnimeStream search matched "${animeTitle}" -> ${alias}`);
 let episodeList=yield fetchAnimeEpisodeList(alias);
 if(!episodeList.length){
 console.log(`[AniZone] No episode list from selected AniZone page; forcing fresh title search`);
-const freshQueries=[baseCleanQuery,animeTitle.split(":")[0].trim(),...altTitles.map(t=>t.split(":")[0].trim()),...targetTitles.map(t=>t.split(":")[0].trim())].filter(Boolean);
+const freshQueries=[
+baseCleanQuery,
+animeTitle.split(":")[0].trim(),
+...altTitles.map(t=>t.split(":")[0].trim()),
+...targetTitles.map(t=>t.split(":")[0].trim())
+].filter(Boolean);
 for(const query of [...new Set(freshQueries)]){
 const freshCard=yield searchAnimeCard(query,specificTargetTitles,query,season,seasonName,true);
 if(!freshCard)continue;
@@ -774,5 +807,4 @@ console.log(`[AniZone] Error: ${error&&error.message||error}`);
 return[];
 }
 });
-}
-module.exports={getStreams};
+} 
