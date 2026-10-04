@@ -139,11 +139,7 @@ const episode=parsePositiveInt(params.episode);
 if(!/^\d+$/.test(tmdbId)||tmdbId.length>MAX_ID_LENGTH||!season||!episode){
 return json(400,{ok:false,error:"tmdbId, season and episode are required"});
 }
-const store=getStore({
-  name:STORE_NAME,
-  siteID:process.env.NETLIFY_SITE_ID,
-  token:process.env.NETLIFY_AUTH_TOKEN
-});
+const store=getStore({name:STORE_NAME});
 const index=await store.get(INDEX_KEY,{type:"json",consistency:"strong"});
 if(!index||!index.byTvdb||typeof index.byTvdb!=="object"){
 return json(503,{ok:false,error:"Shinkro mapping index is not available"});
